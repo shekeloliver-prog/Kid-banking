@@ -22,6 +22,8 @@ export function createApp({ dbPath, clock = () => new Date(), trustProxy = false
   const limiters = {
     login: new AttemptLimiter({ max: 5, lockMs: 5 * 60 * 1000 }),
     loginIp: new AttemptLimiter({ max: 40, lockMs: 5 * 60 * 1000 }),
+    // Not keyed by IP: behind a proxy the client IP comes from a header an attacker can rotate.
+    loginAccount: new AttemptLimiter({ max: 10, lockMs: 10 * 60 * 1000 }),
     register: new AttemptLimiter({ max: 15, lockMs: 60 * 60 * 1000 }),
   };
   registerRoutes(router, { db, bank, limiters, clock });

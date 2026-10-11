@@ -73,7 +73,9 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     }
     const key = `login:${ctx.ip}:${role}:${identifier}`;
     const ipKey = `login-ip:${ctx.ip}`;
+    const acctKey = `login-acct:${role}:${identifier}`;
     limiters.login.assertAllowed(key);
+    limiters.loginAccount.assertAllowed(acctKey);
     limiters.loginIp.assertAllowed(ipKey);
 
     const user =
@@ -86,9 +88,11 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     if (!ok) {
       limiters.login.fail(key);
       limiters.loginIp.fail(ipKey);
+      limiters.loginAccount.fail(acctKey);
       throw new HttpError(401, 'bad_credentials', role === 'parent' ? 'Incorrect email or password.' : 'Incorrect username or PIN.');
     }
     limiters.login.reset(key);
+    limiters.loginAccount.reset(acctKey);
     await startSession(ctx, user);
     return { user: userDto(user), unread: bank.unreadCount(user.id) };
   });

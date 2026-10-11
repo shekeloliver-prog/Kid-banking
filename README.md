@@ -93,6 +93,25 @@ job that runs every 30 seconds. After downtime it pays one allowance, not a back
 | `DB_PATH` | `data/nestly.db` | SQLite file |
 | `TRUST_PROXY` | _unset_ | Set to `1` behind a TLS-terminating proxy so cookies are `Secure` and client IPs are read from `X-Forwarded-For` |
 
+## Deploy to Render
+
+Nestly is one always-on Node server with a SQLite file, so it needs a host with a **persistent disk**
+(Render, Railway, Fly.io…). It will not work on serverless platforms such as Vercel: the filesystem there is
+ephemeral and the allowance scheduler needs a process that stays up.
+
+1. Push this repo to GitHub (the Blueprint deploys the `main` branch).
+2. In Render: **New → Blueprint**, pick this repository, and approve the plan. `render.yaml` creates the
+   web service, sets `TRUST_PROXY=1`, `DB_PATH=/var/data/nestly.db`, `NODE_VERSION`, a health check on
+   `/api/health`, and a 1 GB disk mounted at `/var/data`.
+3. Open the `onrender.com` URL and choose **Create an account**.
+
+Notes:
+- The disk needs a paid instance (the Blueprint uses `starter`). Without a disk, data is lost on every restart.
+- Don't run `npm run demo` in production — it publishes known demo logins.
+- Back up `/var/data/nestly.db` (Render disk snapshots, or `sqlite3 nestly.db ".backup out.db"`).
+- Keep `TRUST_PROXY=1` only behind a proxy you control. Per-account login lockout does not depend on
+  the client IP, but the per-IP limits do.
+
 ## Tests
 
 ```bash

@@ -583,3 +583,32 @@ test('notifications reach the right person and can be marked read', async () => 
   assert.equal((await kid.c.get('/api/notifications')).body.unread, 0);
   assert.ok((await parent.c.get('/api/notifications')).body.unread > 0);
 });
+
+// ───────────────────────── behind a proxy (e.g. Render) ─────────────────────────
+
+test('behind a TLS proxy: cookies are Secure, and rotating X-Forwarded-For cannot dodge login lockout', async () => {
+  const proxied = createApp({ dbPath: ':memory:', clock, trustProxy: true });
+  await new Promise((r) => proxied.server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${proxied.server.address().port}`;
+  const post = (path, body, headers = {}) =>
+    fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  try {
+    const reg = await post('/api/auth/register', { name: 'P', email: 'proxy@example.com', password: 'correct-horse-battery' }, { 'x-forwarded-proto': 'https', 'x-forwarded-for': '203.0.113.1' });
+    assert.equal(reg.status, 200);
+    assert.match(reg.headers.getSetCookie()[0], /; Secure/);
+    // Plain HTTP (no proxy header) must not get a Secure cookie it could never send back.
+    const plain = await post('/api/auth/login', { role: 'parent', identifier: 'proxy@example.com', password: 'correct-horse-battery' }, { 'x-forwarded-for': '203.0.113.2' });
+    assert.doesNotMatch(plain.headers.getSetCookie()[0], /Secure/);
+
+    let locked = false;
+    for (let i = 0; i < 14; i++) {
+      const r = await post('/api/auth/login', { role: 'parent', identifier: 'proxy@example.com', password: 'wrong-wrong-wrong' }, { 'x-forwarded-for': `198.51.100.${i}` });
+      if (r.status === 429) locked = true;
+    }
+    assert.ok(locked, 'account locked despite a different client IP on every attempt');
+    const right = await post('/api/auth/login', { role: 'parent', identifier: 'proxy@example.com', password: 'correct-horse-battery' }, { 'x-forwarded-for': '198.51.100.250' });
+    assert.equal(right.status, 429);
+  } finally {
+    await proxied.close();
+  }
+});
