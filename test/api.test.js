@@ -1,6 +1,10 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/app.js';
+import { Db, openDb } from '../server/lib/db.js';
+import { ipKey } from '../server/lib/auth.js';
+import { restoreApiUrl } from '../server/lib/http.js';
+import { databaseFromEnv } from '../server/config.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -700,4 +704,103 @@ test('behind a proxy only the entry the proxy added is trusted; client-supplied 
   } finally {
     await proxied.close();
   }
+});
+
+// ───────────────────────── hardening from the free-hosting review ─────────────────────────
+
+test('database setup that fails once is retried by the next request instead of staying broken', async () => {
+  let calls = 0;
+  const fake = {
+    executeMultiple: async () => {
+      if (++calls === 1) throw new Error('network blip');
+    },
+    execute: async () => ({ rows: [{ x: 1 }], rowsAffected: 0, lastInsertRowid: 0n }),
+    close() {},
+  };
+  const db = new Db(fake);
+  await assert.rejects(db.get('SELECT 1 AS x'), /network blip/); // the caller that hit the blip fails…
+  assert.deepEqual(await db.get('SELECT 1 AS x'), { x: 1 }); // …the next one retries and works
+  assert.equal(calls, 2);
+});
+
+test('blocked login attempts are rejected without queueing for a write transaction', async () => {
+  const parent = await newParent();
+  const email = `parent${seq}@example.com`;
+  for (let i = 0; i < 10; i++) await new Client().post('/api/auth/login', { role: 'parent', identifier: email, password: 'wrong-wrong-wrong' });
+  let writes = 0;
+  const original = app.db.atomic.bind(app.db);
+  app.db.atomic = (fn) => {
+    writes++;
+    return original(fn);
+  };
+  try {
+    const flood = await Promise.all(Array.from({ length: 60 }, () => new Client().post('/api/auth/login', { role: 'parent', identifier: email, password: 'wrong-wrong-wrong' })));
+    assert.ok(flood.every((r) => r.status === 429));
+    assert.equal(writes, 0, 'rejections must not take the write queue');
+  } finally {
+    app.db.atomic = original;
+  }
+  void parent;
+});
+
+test('the write queue is bounded and fails fast with a friendly error', async () => {
+  const db = openDb({ url: `file:${join(dir, 'queue.db')}` });
+  const results = await Promise.allSettled(Array.from({ length: 400 }, () => db.atomic(async () => new Promise((r) => setTimeout(r, 1)))));
+  const rejected = results.filter((r) => r.status === 'rejected');
+  assert.ok(rejected.length > 0 && rejected.every((r) => r.reason.status === 503 && r.reason.code === 'busy'));
+  assert.ok(results.filter((r) => r.status === 'fulfilled').length >= 100);
+  await db.close();
+});
+
+test('IPv6 clients share one rate-limit bucket per /64; IPv4 is untouched', () => {
+  assert.equal(ipKey('203.0.113.9'), '203.0.113.9');
+  assert.equal(ipKey('::ffff:203.0.113.9'), '203.0.113.9');
+  assert.equal(ipKey('2001:db8:2:2::1'), ipKey('2001:0db8:0002:0002:ffff:ffff:ffff:ffff'));
+  assert.equal(ipKey('2001:db8:2:2::1'), 'v6:2001:db8:2:2');
+  assert.notEqual(ipKey('2001:db8:2:3::1'), ipKey('2001:db8:2:2::1'));
+  assert.equal(ipKey('::1'), 'v6:0:0:0:0');
+  assert.equal(ipKey('fe80::1%eth0'), 'v6:fe80:0:0:0');
+  assert.equal(ipKey('not an ip'), 'not an ip');
+});
+
+test('Vercel rewrite: the original API path is restored whichever URL form the function receives', () => {
+  const fix = (url) => {
+    const req = { url };
+    restoreApiUrl(req);
+    return req.url;
+  };
+  assert.equal(fix('/api?path=auth/login'), '/api/auth/login');
+  assert.equal(fix('/api?path=kids/5/send'), '/api/kids/5/send');
+  assert.equal(fix('/api?path=activity&limit=30&before=9'), '/api/activity?limit=30&before=9');
+  assert.equal(fix('/api/?path=health'), '/api/health');
+  assert.equal(fix('/api/auth/login'), '/api/auth/login'); // already the original form: untouched
+  assert.equal(fix('/api/activity?limit=5&path=x'), '/api/activity?limit=5&path=x');
+  assert.equal(fix('/api'), '/api');
+  // Path-ish input is only ever re-encoded into /api/<segment>... — it can't escape the /api prefix.
+  assert.equal(fix('/api?path=../../etc/passwd'), '/api/etc/passwd'); // dot segments are dropped
+});
+
+test('hosts with an ephemeral disk refuse to silently use a local database file', () => {
+  const root = '/srv/app';
+  assert.deepEqual(databaseFromEnv({ TURSO_DATABASE_URL: ' libsql://x.turso.io ', TURSO_AUTH_TOKEN: 't' }, { root }), { url: 'libsql://x.turso.io', authToken: 't' });
+  assert.equal(databaseFromEnv({ VERCEL: '1' }, { root }), null);
+  assert.equal(databaseFromEnv({ RENDER: 'true' }, { root }), null);
+  assert.equal(databaseFromEnv({ RENDER: 'true', TURSO_DATABASE_URL: '', TURSO_AUTH_TOKEN: '' }, { root }), null);
+  assert.deepEqual(databaseFromEnv({ RENDER: 'true', DB_PATH: '/var/data/n.db' }, { root }), { url: 'file:/var/data/n.db' }); // explicit disk is fine
+  assert.deepEqual(databaseFromEnv({}, { root }), { url: 'file:/srv/app/data/nestly.db' });
+});
+
+test('the cron endpoint also purges expired sessions and stale limiter rows', async () => {
+  const parent = await newParent();
+  await app.db.run("INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES ('login:stale', 1, 0, ?)", [Date.now() - 3 * 24 * 60 * 60 * 1000]);
+  const cronApp = createApp({ dbUrl: freshDb(), clock, cronSecret: 's3cret' });
+  await new Promise((r) => cronApp.server.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${cronApp.server.address().port}`;
+    assert.equal((await fetch(url + '/api/cron/allowances')).status, 401);
+    assert.equal((await fetch(url + '/api/cron/allowances', { headers: { authorization: 'Bearer s3cret' } })).status, 200);
+  } finally {
+    await cronApp.close();
+  }
+  void parent;
 });

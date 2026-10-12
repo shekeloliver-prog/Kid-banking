@@ -1,6 +1,7 @@
 import { createClient } from '@libsql/client';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
+import { HttpError } from './util.js';
 import { dirname } from 'node:path';
 
 // One async interface over libSQL (SQLite). The same code runs against a local file on your laptop or a
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS kid_controls (
   kid_id                   INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -110,19 +112,48 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   locked_until INTEGER NOT NULL DEFAULT 0,
   updated_at   INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS rate_limits_updated ON rate_limits(updated_at);
 `;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isBusy = (err) => /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i.test(String(err?.message ?? err));
 const plain = (row) => ({ ...row });
 
+const MAX_QUEUED_WRITES = 150;
+
 export class Db {
+  #ready = null;
+  #queued = 0;
+
   constructor(client) {
     this.client = client;
     this.als = new AsyncLocalStorage();
     this.chain = Promise.resolve();
-    this.ready = client.executeMultiple(SCHEMA);
-    this.ready.catch(() => {}); // surfaced when something awaits `ready`; this just prevents an unhandled-rejection crash
+    this.ensureReady().catch(() => {}); // start early; a failure is retried by the next caller, never cached
+  }
+
+  /**
+   * Creates the tables if needed. The in-flight promise is shared, but a FAILED attempt is forgotten so the next
+   * caller tries again — a one-off network blip at cold start must not leave this instance broken for good.
+   */
+  ensureReady() {
+    this.#ready ??= this.#init().catch((err) => {
+      this.#ready = null;
+      throw err;
+    });
+    return this.#ready;
+  }
+
+  async #init() {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.executeMultiple(SCHEMA);
+        return;
+      } catch (err) {
+        if (isBusy(err) && attempt < 4) await sleep(60 * 2 ** attempt);
+        else throw err;
+      }
+    }
   }
 
   /** Statements run on the open transaction if there is one (tracked per async call chain), else on the connection. */
@@ -131,6 +162,7 @@ export class Db {
   }
 
   async all(sql, args = []) {
+    await this.ensureReady();
     const rs = await this.#exec().execute({ sql, args });
     return rs.rows.map(plain);
   }
@@ -141,6 +173,7 @@ export class Db {
   }
 
   async run(sql, args = []) {
+    await this.ensureReady();
     const rs = await this.#exec().execute({ sql, args });
     return { changes: rs.rowsAffected, lastInsertRowid: Number(rs.lastInsertRowid ?? 0) };
   }
@@ -153,7 +186,12 @@ export class Db {
    */
   atomic(fn) {
     if (this.als.getStore()) return fn();
-    const run = this.chain.then(() => this.#attempt(fn));
+    // Bounded queue: under a flood, fail fast with a friendly error instead of letting every request wait behind the rest.
+    if (this.#queued >= MAX_QUEUED_WRITES) {
+      return Promise.reject(new HttpError(503, 'busy', 'Nestly is busy right now. Please try again in a moment.'));
+    }
+    this.#queued++;
+    const run = this.chain.then(() => this.#attempt(fn)).finally(() => this.#queued--);
     this.chain = run.catch(() => {});
     return run;
   }
@@ -162,6 +200,7 @@ export class Db {
     for (let attempt = 0; ; attempt++) {
       let tx;
       try {
+        await this.ensureReady();
         tx = await this.client.transaction('write');
         const result = await this.als.run(tx, fn);
         await tx.commit();

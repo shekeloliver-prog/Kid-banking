@@ -1,7 +1,9 @@
-// Vercel serverless entry: every /api/* request lands here. Static files in public/ are served by Vercel itself.
-// Requires a hosted database (Turso): a local file would not survive between invocations.
+// Vercel serverless entry: vercel.json rewrites every /api/* request to this one function. Static files in
+// public/ are served by Vercel itself. Requires a hosted database (Turso): a local file would not survive
+// between invocations.
 import { createApp } from '../server/app.js';
 import { databaseFromEnv, trustProxyFromEnv } from '../server/config.js';
+import { restoreApiUrl } from '../server/lib/http.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,5 +36,6 @@ export default async function handler(req, res) {
     );
     return;
   }
+  restoreApiUrl(req);
   await app.handle(req, res);
 }

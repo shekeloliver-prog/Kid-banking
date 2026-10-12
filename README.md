@@ -65,8 +65,8 @@ server/
   lib/auth.js       scrypt password hashing, sessions, login throttling
   config.js         picks the database from the environment
   lib/db.js         schema + one async interface over libSQL (local file or hosted Turso)
-api/[...path].js    Vercel serverless entry (same app, no server process)
-vercel.json         Vercel config: security headers, daily allowance cron
+api/index.js        Vercel serverless entry (same app, no server process)
+vercel.json         Vercel config: /api rewrite, security headers, daily allowance cron
 render.yaml         Render blueprint (free plan + Turso)
 public/             the single-page app: vanilla ES modules + one stylesheet, no build step
 test/api.test.js    API tests (npm test)
@@ -128,12 +128,15 @@ environment variables differ.
 | `CRON_SECRET` | any long random string (Vercel sends it to the daily allowance job automatically) |
 
 Until the database variables are set, the site shows a "Nestly isn't set up yet" message instead of crashing.
+Preview deployments (branches) use the **Preview** environment's variables, so add them there too if you want to test a branch.
 `TRUST_PROXY` isn't needed: the Vercel entry already trusts exactly one proxy.
 
 ### 2b. Render (free plan)
 1. **New → Blueprint**, pick this repo; `render.yaml` creates a free web service.
 2. When asked, paste `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
 3. Free services sleep after ~15 minutes idle and wake in a few seconds on the next visit.
+   If the database variables are missing the service refuses to start (and says why in its logs) rather than quietly
+   storing data on a disk that is wiped on every restart.
 
 ### How allowances work without an always-on server
 There's no background process on these hosts, so allowances are paid (a) by a daily cron on Vercel,

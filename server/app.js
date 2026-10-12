@@ -5,7 +5,7 @@ import { openDb } from './lib/db.js';
 import { createBank } from './lib/bank.js';
 import { Router, readJson, sendJson, parseCookies, serveStatic, SECURITY_HEADERS } from './lib/http.js';
 import { HttpError } from './lib/util.js';
-import { AttemptLimiter, lookupSession, purgeExpiredSessions, SESSION_COOKIE, SESSION_TTL_MS } from './lib/auth.js';
+import { AttemptLimiter, lookupSession, purgeExpiredSessions, ipKey, SESSION_COOKIE, SESSION_TTL_MS } from './lib/auth.js';
 import { registerRoutes } from './routes.js';
 
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -31,11 +31,16 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
 
   // Serverless hosts have no background timer, so allowances are also paid opportunistically as people use the app.
   let lastLazyRun = 0;
+  let lastPurge = 0;
   async function maybePayAllowances() {
     if (!lazyAllowances || Date.now() - lastLazyRun < 60_000) return;
     lastLazyRun = Date.now();
     try {
       await bank.runAllowances();
+      if (Date.now() - lastPurge > 60 * 60 * 1000) {
+        lastPurge = Date.now();
+        await purgeExpiredSessions(db, clock());
+      }
     } catch (err) {
       console.error('Opportunistic allowance run failed', err);
     }
@@ -104,7 +109,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
       body: MUTATING.has(req.method) ? await readJson(req) : {},
       user,
       token,
-      ip: clientIp(req),
+      ip: ipKey(clientIp(req)),
       cookieHeaders: [],
       setSession(value, expires) {
         const maxAge = Math.floor(SESSION_TTL_MS / 1000);
@@ -126,7 +131,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname.startsWith('/api/')) {
         try {
-          await db.ready;
+          await db.ensureReady();
         } catch (err) {
           console.error('Database is not available', err);
           throw new HttpError(503, 'db_unavailable', "Nestly can't reach its database right now. Please try again in a moment.");
@@ -149,7 +154,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
   function startJobs() {
     const tick = async () => {
       try {
-        await db.ready;
+        await db.ensureReady();
         await bank.runAllowances();
         await purgeExpiredSessions(db, clock());
       } catch (err) {

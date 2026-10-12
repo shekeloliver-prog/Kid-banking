@@ -13,7 +13,7 @@ const dbPath = join(root, 'data', 'demo.db');
 for (const suffix of ['', '-wal', '-shm']) if (existsSync(dbPath + suffix)) rmSync(dbPath + suffix);
 
 const db = openDb({ url: `file:${dbPath}` });
-await db.ready;
+await db.ensureReady();
 const realNow = Date.now();
 let clockMs = realNow - 36 * 86400000;
 const bank = createBank(db, () => new Date(clockMs));

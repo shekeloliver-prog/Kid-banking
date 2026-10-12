@@ -125,24 +125,52 @@ export class AttemptLimiter {
     return `${this.name}:${key}`;
   }
 
+  /** Throws 429 if any of these (already-prefixed) keys is currently locked. A plain read: no transaction, no queue. */
+  static async assertNotLocked(db, entries, now) {
+    const rows = await db.all(
+      `SELECT locked_until FROM rate_limits WHERE key IN (${entries.map(() => '?').join(',')}) AND locked_until > ?`,
+      [...entries, now],
+    );
+    if (rows.length) {
+      const until = Math.max(...rows.map((r) => r.locked_until));
+      const mins = Math.max(1, Math.ceil((until - now) / 60000));
+      throw new HttpError(429, 'too_many_attempts', `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`);
+    }
+  }
+
   async reserve(key) {
-    const k = this.#k(key);
-    await this.db.atomic(async () => {
-      const now = this.now();
-      const row = await this.db.get('SELECT count, locked_until, updated_at FROM rate_limits WHERE key = ?', [k]);
-      if (row && row.locked_until > now) {
-        const mins = Math.max(1, Math.ceil((row.locked_until - now) / 60000));
-        throw new HttpError(429, 'too_many_attempts', `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`);
-      }
-      // A finished lock, or a count that has sat idle past the window, starts over.
-      const stale = row && ((row.locked_until && row.locked_until <= now) || now - row.updated_at > this.windowMs);
-      const count = (row && !stale ? row.count : 0) + 1;
-      await this.db.run(
-        `INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET count = excluded.count, locked_until = excluded.locked_until, updated_at = excluded.updated_at`,
-        [k, count, count >= this.max ? now + this.lockMs : 0, now],
-      );
+    await AttemptLimiter.reserveMany(this.db, [[this, key]]);
+  }
+
+  /**
+   * Check-and-count several (limiter, key) pairs together. Locked keys are rejected with a cheap read first, so a
+   * flood of blocked requests never queues for a write transaction; admitted attempts are then re-checked and
+   * counted inside one transaction so parallel guesses can't race past a limit.
+   */
+  static async reserveMany(db, pairs) {
+    const now = pairs[0][0].now();
+    await AttemptLimiter.assertNotLocked(db, pairs.map(([l, k]) => `${l.name}:${k}`), now);
+    await db.atomic(async () => {
+      for (const [limiter, key] of pairs) await limiter.#reserveInTx(key);
     });
+  }
+
+  async #reserveInTx(key) {
+    const k = this.#k(key);
+    const now = this.now();
+    const row = await this.db.get('SELECT count, locked_until, updated_at FROM rate_limits WHERE key = ?', [k]);
+    if (row && row.locked_until > now) {
+      const mins = Math.max(1, Math.ceil((row.locked_until - now) / 60000));
+      throw new HttpError(429, 'too_many_attempts', `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`);
+    }
+    // A finished lock, or a count that has sat idle past the window, starts over.
+    const stale = row && ((row.locked_until && row.locked_until <= now) || now - row.updated_at > this.windowMs);
+    const count = (row && !stale ? row.count : 0) + 1;
+    await this.db.run(
+      `INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET count = excluded.count, locked_until = excluded.locked_until, updated_at = excluded.updated_at`,
+      [k, count, count >= this.max ? now + this.lockMs : 0, now],
+    );
   }
 
   async release(key) {
@@ -160,4 +188,21 @@ export class AttemptLimiter {
   async clear() {
     await this.db.run('DELETE FROM rate_limits WHERE key LIKE ?', [`${this.name}:%`]);
   }
+}
+
+/**
+ * Rate-limit key for a client address. IPv6 users usually control a whole /64, so every address in it shares one
+ * bucket (otherwise one person has billions of buckets). IPv4 and IPv4-mapped addresses are used as-is.
+ */
+export function ipKey(ip) {
+  const addr = String(ip).split('%')[0].toLowerCase();
+  if (!addr.includes(':')) return addr;
+  const mapped = addr.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return mapped[1];
+  const [head, tail] = addr.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const groups = addr.includes('::') ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t] : h;
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return addr;
+  return 'v6:' + groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':');
 }

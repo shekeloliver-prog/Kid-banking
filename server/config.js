@@ -3,15 +3,18 @@ import { join } from 'node:path';
 /**
  * Where the database lives, from the environment:
  *   TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN)  a hosted libSQL/Turso database — what serverless/free hosts use
- *   DB_PATH                                  a local file (default data/nestly.db) — for your laptop or a server with a disk
- * Returns null when running on a serverless platform with no database configured (a local file there would
- * silently vanish, so we refuse instead).
+ *   DB_PATH                                  a local file — your laptop, or a server with a persistent disk
+ * Returns null when running on a platform whose disk is ephemeral (Vercel, Render) with neither set: a local file
+ * there would silently vanish on the next restart, so we refuse to guess.
  */
 export function databaseFromEnv(env, { root, demo = false } = {}) {
   if (demo) return { url: `file:${join(root, 'data', 'demo.db')}` };
-  if (env.TURSO_DATABASE_URL) return { url: env.TURSO_DATABASE_URL, authToken: env.TURSO_AUTH_TOKEN };
-  if (env.VERCEL) return null;
-  return { url: `file:${env.DB_PATH || join(root, 'data', 'nestly.db')}` };
+  const turso = String(env.TURSO_DATABASE_URL ?? '').trim();
+  if (turso) return { url: turso, authToken: String(env.TURSO_AUTH_TOKEN ?? '').trim() || undefined };
+  const path = String(env.DB_PATH ?? '').trim();
+  if (path) return { url: `file:${path}` };
+  if (env.VERCEL || env.RENDER) return null;
+  return { url: `file:${join(root, 'data', 'nestly.db')}` };
 }
 
 /** TRUST_PROXY = number of trusted proxies in front of the app (0 = none). */

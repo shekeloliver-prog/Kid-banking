@@ -6,6 +6,13 @@ import { dirname, join } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const demo = process.argv.includes('--demo');
 const db = databaseFromEnv(process.env, { root, demo });
+if (!db) {
+  console.error(
+    '\nNestly needs a database. This host has no persistent disk, so set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN\n' +
+      '(a free hosted database from https://turso.tech), or set DB_PATH to a file on a mounted disk.\n',
+  );
+  process.exit(1);
+}
 const port = Number(process.env.PORT) || 3000;
 const host = process.env.HOST || '0.0.0.0';
 

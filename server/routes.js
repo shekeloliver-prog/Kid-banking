@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { HttpError, text, cents, oneOf, password, email, username, id, timezone, AVATARS, COLORS, CATEGORIES } from './lib/util.js';
-import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions } from './lib/auth.js';
+import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions, purgeExpiredSessions, AttemptLimiter } from './lib/auth.js';
 
 const KID_PIN_MIN = 6;
 
@@ -27,10 +27,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret }
   const positive = (v, field = 'Amount') => cents(v, { field });
 
   /** Counts an attempt on several limiters in one transaction, before any slow work (see AttemptLimiter). */
-  const reserveAll = (pairs) =>
-    db.atomic(async () => {
-      for (const [limiter, key] of pairs) await limiter.reserve(key);
-    });
+  const reserveAll = (pairs) => AttemptLimiter.reserveMany(db, pairs);
 
   /** Checks a password the user typed to confirm a sensitive action, with brute-force protection. */
   async function confirmPassword(ctx, plain) {
@@ -64,6 +61,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret }
     const b = Buffer.from(expected);
     if (!cronSecret || a.length !== b.length || !timingSafeEqual(a, b)) throw new HttpError(401, 'unauthenticated', 'Not allowed.');
     const paid = await bank.runAllowances();
+    await purgeExpiredSessions(db, clock());
     return { paid: paid.length };
   });
 

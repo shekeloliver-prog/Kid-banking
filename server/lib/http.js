@@ -165,3 +165,18 @@ export function serveStatic(rootDir, req, res) {
   if (req.method === 'HEAD') return res.end();
   createReadStream(file).pipe(res);
 }
+
+/**
+ * Vercel rewrites /api/* to the single function at /api and passes the original path along as ?path=a/b/c.
+ * Depending on the platform version the function may see either the original or the rewritten URL, so accept
+ * both: if we were handed the bare /api URL with a `path` parameter, rebuild the real one.
+ */
+export function restoreApiUrl(req) {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/api' && url.pathname !== '/api/') return;
+  const path = url.searchParams.get('path');
+  if (path === null) return;
+  url.searchParams.delete('path');
+  const segments = path.split('/').filter((seg) => seg && seg !== '.' && seg !== '..').map(encodeURIComponent);
+  req.url = `/api${segments.length ? '/' + segments.join('/') : ''}${url.search}`;
+}
