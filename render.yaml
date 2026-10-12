@@ -1,0 +1,27 @@
+# Render Blueprint: deploys Nestly as a single always-on web service with a persistent disk.
+# https://render.com/docs/blueprint-spec
+#
+# Persistent disks require a paid instance type (starter or above). Without the disk the
+# SQLite database lives on an ephemeral filesystem and every account and balance is wiped on restart.
+services:
+  - type: web
+    name: nestly
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    autoDeploy: true
+    buildCommand: npm install --omit=dev   # Nestly has no dependencies; this just satisfies Render
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0                     # node:sqlite needs Node 22.13+
+      - key: TRUST_PROXY
+        value: "1"                         # Render terminates TLS: Secure cookies + client IPs from X-Forwarded-*
+      - key: DB_PATH
+        value: /var/data/nestly.db         # must live on the mounted disk below
+    disk:
+      name: nestly-data
+      mountPath: /var/data
+      sizeGB: 1
