@@ -1,16 +1,19 @@
 {
   "name": "nestly",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Nestly — a family bank where parents set the rules and kids learn to save.",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20.10"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning server/index.js",
-    "demo": "node --disable-warning=ExperimentalWarning server/seed.js && node --disable-warning=ExperimentalWarning server/index.js --demo",
-    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\""
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "demo": "node server/seed.js && node server/index.js --demo",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@libsql/client": "0.18.0"
   }
 }

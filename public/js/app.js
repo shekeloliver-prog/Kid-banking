@@ -93,12 +93,31 @@ window.addEventListener('nestly:signed-out', () => {
   if (state.user) showAuth('Your session ended. Please log in again.');
 });
 
+function showSetupProblem(err) {
+  stopPolling();
+  app.replaceChildren(
+    h(
+      'div',
+      { class: 'loading-screen' },
+      h(
+        'div',
+        { class: 'empty', style: { maxWidth: '460px', padding: '24px' } },
+        h('div', { class: 'art', 'aria-hidden': 'true' }, err.code === 'not_configured' ? '🛠️' : '😕'),
+        h('h3', null, err.code === 'not_configured' ? 'Nestly isn’t set up yet' : 'Can’t reach Nestly right now'),
+        h('p', null, err.message),
+        h('button', { class: 'btn btn-primary', onClick: () => location.reload() }, 'Try again'),
+      ),
+    ),
+  );
+}
+
 (async function boot() {
   try {
     const session = await api.get('/session');
     if (session.user) mountApp(session);
     else showAuth();
-  } catch {
-    showAuth();
+  } catch (err) {
+    if (err.status === 503 || err.status === 0) showSetupProblem(err);
+    else showAuth();
   }
 })();

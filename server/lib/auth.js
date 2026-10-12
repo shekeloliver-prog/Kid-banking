@@ -60,108 +60,104 @@ export async function burnPasswordCheck(password) {
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-export function createSession(db, userId, now = new Date()) {
+export async function createSession(db, userId, now = new Date()) {
   const token = randomBytes(32).toString('base64url');
   const expires = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, last_seen, expires_at) VALUES (?, ?, ?, ?, ?)').run(
+  await db.run('INSERT INTO sessions (token_hash, user_id, created_at, last_seen, expires_at) VALUES (?, ?, ?, ?, ?)', [
     sha256(token),
     userId,
     now.toISOString(),
     now.toISOString(),
     expires,
-  );
+  ]);
   return { token, expires };
 }
 
-export function lookupSession(db, token, now = new Date()) {
+export async function lookupSession(db, token, now = new Date()) {
   if (!token || typeof token !== 'string' || token.length > 200) return null;
   const hash = sha256(token);
-  const row = db
-    .prepare(
-      `SELECT u.*, s.last_seen AS session_last_seen FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ? AND s.expires_at > ?`,
-    )
-    .get(hash, now.toISOString());
+  const row = await db.get(
+    `SELECT u.*, s.last_seen AS session_last_seen FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token_hash = ? AND s.expires_at > ?`,
+    [hash, now.toISOString()],
+  );
   if (!row) return null;
   // Slide the expiry forward, but only write to the database about once an hour.
   if (now.getTime() - new Date(row.session_last_seen).getTime() > 60 * 60 * 1000) {
-    db.prepare('UPDATE sessions SET last_seen = ?, expires_at = ? WHERE token_hash = ?').run(
+    await db.run('UPDATE sessions SET last_seen = ?, expires_at = ? WHERE token_hash = ?', [
       now.toISOString(),
       new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
       hash,
-    );
+    ]);
   }
   return row;
 }
 
-export function destroySession(db, token) {
-  if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(sha256(token));
+export async function destroySession(db, token) {
+  if (token) await db.run('DELETE FROM sessions WHERE token_hash = ?', [sha256(token)]);
 }
 
-export function destroyUserSessions(db, userId, exceptToken) {
-  if (exceptToken) {
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(userId, sha256(exceptToken));
-  } else {
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-  }
+export async function destroyUserSessions(db, userId, exceptToken) {
+  if (exceptToken) await db.run('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?', [userId, sha256(exceptToken)]);
+  else await db.run('DELETE FROM sessions WHERE user_id = ?', [userId]);
 }
 
-export function purgeExpiredSessions(db, now = new Date()) {
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now.toISOString());
+export async function purgeExpiredSessions(db, now = new Date()) {
+  await db.run('DELETE FROM sessions WHERE expires_at <= ?', [now.toISOString()]);
+  // Rate-limit rows are tiny but would otherwise pile up forever.
+  await db.run('DELETE FROM rate_limits WHERE locked_until < ? AND updated_at < ?', [now.getTime(), now.getTime() - 24 * 60 * 60 * 1000]);
 }
 
-/** Fixed-window failure counter with a lockout, keyed by whatever string you give it. */
+/**
+ * Failure counter with a lockout, keyed by whatever string you give it. Stored in the database so it holds
+ * across serverless instances and restarts.
+ *
+ * Use reserve() BEFORE the slow password check: it checks and counts the attempt in one transaction, so a burst
+ * of parallel guesses can't all pass the check first. Then reset() on success (or release() for shared keys
+ * like an IP address, to give the attempt back).
+ */
 export class AttemptLimiter {
-  constructor({ max = 5, lockMs = 5 * 60 * 1000, now = () => Date.now() } = {}) {
-    this.max = max;
-    this.lockMs = lockMs;
-    this.now = now;
-    this.entries = new Map();
+  constructor(db, { name, max = 5, lockMs = 5 * 60 * 1000, windowMs = lockMs, now = () => Date.now() }) {
+    Object.assign(this, { db, name, max, lockMs, windowMs, now });
   }
 
-  assertAllowed(key) {
-    const e = this.entries.get(key);
-    if (e && e.lockedUntil > this.now()) {
-      const mins = Math.max(1, Math.ceil((e.lockedUntil - this.now()) / 60000));
-      throw new HttpError(429, 'too_many_attempts', `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`);
-    }
+  #k(key) {
+    return `${this.name}:${key}`;
   }
 
-  fail(key) {
-    if (this.entries.size > 5000) this.prune();
-    const e = this.entries.get(key) ?? { count: 0, lockedUntil: 0 };
-    if (e.lockedUntil && e.lockedUntil <= this.now()) {
-      e.count = 0;
-      e.lockedUntil = 0;
-    }
-    e.count += 1;
-    if (e.count >= this.max) e.lockedUntil = this.now() + this.lockMs;
-    this.entries.set(key, e);
+  async reserve(key) {
+    const k = this.#k(key);
+    await this.db.atomic(async () => {
+      const now = this.now();
+      const row = await this.db.get('SELECT count, locked_until, updated_at FROM rate_limits WHERE key = ?', [k]);
+      if (row && row.locked_until > now) {
+        const mins = Math.max(1, Math.ceil((row.locked_until - now) / 60000));
+        throw new HttpError(429, 'too_many_attempts', `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`);
+      }
+      // A finished lock, or a count that has sat idle past the window, starts over.
+      const stale = row && ((row.locked_until && row.locked_until <= now) || now - row.updated_at > this.windowMs);
+      const count = (row && !stale ? row.count : 0) + 1;
+      await this.db.run(
+        `INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET count = excluded.count, locked_until = excluded.locked_until, updated_at = excluded.updated_at`,
+        [k, count, count >= this.max ? now + this.lockMs : 0, now],
+      );
+    });
   }
 
-  reset(key) {
-    this.entries.delete(key);
+  async release(key) {
+    await this.db.run(
+      'UPDATE rate_limits SET count = MAX(0, count - 1) WHERE key = ? AND locked_until <= ?',
+      [this.#k(key), this.now()],
+    );
   }
 
-  /**
-   * Check and count an attempt in one synchronous step, *before* any await. Counting only after a slow
-   * password check lets a burst of parallel guesses all pass the check first.
-   * Follow with reset() on success (or release() for shared keys).
-   */
-  reserve(key) {
-    this.assertAllowed(key);
-    this.fail(key);
+  async reset(key) {
+    await this.db.run('DELETE FROM rate_limits WHERE key = ?', [this.#k(key)]);
   }
 
-  /** Gives back one reserved attempt (used for shared keys like an IP when the attempt succeeded). */
-  release(key) {
-    const e = this.entries.get(key);
-    if (!e || e.lockedUntil > this.now()) return;
-    e.count = Math.max(0, e.count - 1);
-    if (e.count === 0) this.entries.delete(key);
-  }
-
-  prune() {
-    for (const [k, e] of this.entries) if (e.lockedUntil <= this.now()) this.entries.delete(k);
+  /** Forget everything this limiter knows (used by tests). */
+  async clear() {
+    await this.db.run('DELETE FROM rate_limits WHERE key LIKE ?', [`${this.name}:%`]);
   }
 }

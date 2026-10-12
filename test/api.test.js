@@ -1,7 +1,13 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/app.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+const dir = mkdtempSync(join(tmpdir(), 'nestly-test-'));
+let dbCount = 0;
+const freshDb = () => `file:${join(dir, `t${++dbCount}.db`)}`;
 let app;
 let base;
 let now;
@@ -70,7 +76,7 @@ async function newKid(parent, name = 'Mia', username = `kid${++seq}`) {
 const fund = (parent, amountCents) => parent.c.post('/api/parent/funds', { amountCents });
 
 // The database is shared between tests, so only look at payouts for the kid under test.
-const payOut = (kid) => app.bank.runAllowances().filter((p) => p.kidId === kid.id);
+const payOut = async (kid) => (await app.bank.runAllowances()).filter((p) => p.kidId === kid.id);
 // Sessions last 7 days, so after a big time jump a kid has to log in again.
 async function relogin(kid) {
   kid.c = new Client();
@@ -80,25 +86,23 @@ async function relogin(kid) {
 
 before(async () => {
   now = new Date('2026-10-11T12:00:00Z'); // a Sunday
-  app = createApp({ dbPath: ':memory:', clock });
+  app = createApp({ dbUrl: freshDb(), clock });
   await new Promise((r) => app.server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${app.server.address().port}`;
 });
 after(() => app.close());
-beforeEach(() => {
+beforeEach(async () => {
   now = new Date('2026-10-11T12:00:00Z');
-  for (const l of Object.values(app.limiters)) l.entries.clear();
+  for (const l of Object.values(app.limiters)) await l.clear();
 });
 
 /** Every balance must equal the sum of the ledger rows that touch it. */
-function assertLedgerBalanced() {
-  const rows = app.db
-    .prepare(
-      `SELECT u.id, u.balance_cents AS bal,
-         COALESCE((SELECT SUM(amount_cents) FROM transactions t WHERE t.user_id = u.id AND t.kind != 'goal_purchase'), 0) AS ledger
-       FROM users u`,
-    )
-    .all();
+async function assertLedgerBalanced() {
+  const rows = await app.db.all(
+    `SELECT u.id, u.balance_cents AS bal,
+       COALESCE((SELECT SUM(amount_cents) FROM transactions t WHERE t.user_id = u.id AND t.kind != 'goal_purchase'), 0) AS ledger
+     FROM users u`,
+  );
   for (const r of rows) assert.equal(r.bal, r.ledger, `user ${r.id} balance ${r.bal} != ledger ${r.ledger}`);
 }
 
@@ -240,7 +244,7 @@ test('parent funds, sends and takes back money; the books balance', async () => 
   assert.deepEqual([sent.body.balanceCents, sent.body.kidBalanceCents], [12500, 7500]);
   const back = await parent.c.post(`/api/kids/${kid.id}/take`, { amountCents: 2500 });
   assert.deepEqual([back.body.balanceCents, back.body.kidBalanceCents], [15000, 5000]);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
   const kidView = (await kid.c.get('/api/kid/overview')).body;
   assert.equal(kidView.kid.balanceCents, 5000);
   assert.equal(kidView.recent[0].kind, 'takeback_out');
@@ -262,7 +266,7 @@ test('amounts are validated and overdrafts are refused', async () => {
   assert.equal((await fund(parent, 50001)).status, 400); // above the per-deposit practice cap
   const takeTooMuch = await parent.c.post(`/api/kids/${kid.id}/take`, { amountCents: 100 });
   assert.equal(takeTooMuch.body.error.code, 'insufficient_funds');
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test("a parent can never touch another family's kid", async () => {
@@ -295,7 +299,7 @@ test('concurrent sends cannot overdraw the parent', async () => {
   assert.equal(results.filter((r) => r.status === 200).length, 5);
   assert.equal((await parent.c.get('/api/parent/overview')).body.balanceCents, 0);
   assert.equal((await kid.c.get('/api/kid/overview')).body.kid.balanceCents, 10000);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 // ───────────────────────── parental controls ─────────────────────────
@@ -323,7 +327,7 @@ test('weekly spending limit blocks overspending and rolls off after 7 days', asy
   advance(7 * DAY + 60_000);
   await relogin(kid);
   assert.equal((await kid.c.post('/api/kid/spend', { amountCents: 1000, category: 'games' })).status, 200);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('freezing an account blocks spending but not saving or asking', async () => {
@@ -341,7 +345,7 @@ test('freezing an account blocks spending but not saving or asking', async () =>
   assert.equal((await kid.c.post('/api/kid/requests', { amountCents: 500, reason: 'Snack' })).status, 200);
   await parent.c.put(`/api/kids/${kid.id}/controls`, { frozen: false });
   assert.equal((await kid.c.post(`/api/kid/goals/${goal.body.id}/purchase`)).status, 200);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('control input is validated', async () => {
@@ -379,7 +383,7 @@ test('kids can ask for money; parents approve or decline within the cap', async 
   const view = (await kid.c.get('/api/kid/overview')).body;
   assert.equal(view.kid.balanceCents, 1000);
   assert.deepEqual(view.requests.map((r) => r.status).sort(), ['approved', 'declined']);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('approving a request needs enough funds and leaves the request pending', async () => {
@@ -403,21 +407,21 @@ test('allowance pays on schedule, exactly once per period', async () => {
   const set = await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 1000, freq: 'weekly', day: 5, active: true } });
   assert.equal(set.body.allowance.next, '2026-10-16');
 
-  assert.deepEqual(payOut(kid), []);
+  assert.deepEqual(await payOut(kid), []);
   advance(4 * DAY); // Thursday
-  assert.deepEqual(payOut(kid), []);
+  assert.deepEqual(await payOut(kid), []);
   advance(1 * DAY); // Friday
-  assert.equal(payOut(kid).length, 1);
-  assert.equal(payOut(kid).length, 0); // running again is a no-op
+  assert.equal((await payOut(kid)).length, 1);
+  assert.equal((await payOut(kid)).length, 0); // running again is a no-op
   await relogin(kid);
   assert.equal((await kid.c.get('/api/kid/overview')).body.kid.balanceCents, 1000);
   assert.equal((await kid.c.get('/api/kid/overview')).body.kid.allowance.next, '2026-10-23');
 
   advance(7 * DAY);
-  assert.equal(payOut(kid).length, 1);
+  assert.equal((await payOut(kid)).length, 1);
   await relogin(kid);
   assert.equal((await kid.c.get('/api/kid/overview')).body.kid.balanceCents, 2000);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('a long outage pays one allowance, not a backlog', async () => {
@@ -426,8 +430,8 @@ test('a long outage pays one allowance, not a backlog', async () => {
   await fund(parent, 30000);
   await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 500, freq: 'weekly', day: 5, active: true } });
   advance(30 * DAY);
-  assert.equal(payOut(kid).length, 1);
-  assert.equal(payOut(kid).length, 0);
+  assert.equal((await payOut(kid)).length, 1);
+  assert.equal((await payOut(kid)).length, 0);
   await relogin(kid);
   const next = (await kid.c.get('/api/kid/overview')).body.kid.allowance.next;
   assert.ok(next > '2026-11-10', next);
@@ -438,15 +442,15 @@ test('allowance waits for funds, warns the parent once, then pays', async () => 
   const kid = await newKid(parent);
   await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 1000, freq: 'weekly', day: 5, active: true } });
   advance(5 * DAY);
-  assert.equal(payOut(kid).length, 0);
-  payOut(kid);
-  payOut(kid);
+  assert.equal((await payOut(kid)).length, 0);
+  await payOut(kid);
+  await payOut(kid);
   const warnings = (await parent.c.get('/api/notifications')).body.items.filter((n) => n.title.includes('allowance is waiting'));
   assert.equal(warnings.length, 1);
   await fund(parent, 5000);
-  assert.equal(payOut(kid).length, 1);
+  assert.equal((await payOut(kid)).length, 1);
   assert.equal((await kid.c.get('/api/kid/overview')).body.kid.balanceCents, 1000);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('monthly and biweekly schedules are computed correctly', async () => {
@@ -489,7 +493,7 @@ test('savings goals: save, withdraw, hit the target, buy it', async () => {
   assert.equal((await kid.c.post(`/api/kid/goals/${goal}/purchase`)).status, 400); // can't buy twice
   const note = (await parent.c.get('/api/notifications')).body.items.find((n) => n.title.includes('bought'));
   assert.ok(note);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test("kids can't touch each other's goals", async () => {
@@ -519,7 +523,7 @@ test('removing a kid needs the parent password and returns all their money', asy
   assert.equal(overview.kids.length, 0);
   assert.equal((await kid.c.get('/api/kid/overview')).status, 401); // their session is gone
   assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' })).status, 401);
-  assertLedgerBalanced();
+  await assertLedgerBalanced();
 });
 
 test('resetting a PIN signs the kid out and the new PIN works', async () => {
@@ -587,7 +591,7 @@ test('notifications reach the right person and can be marked read', async () => 
 // ───────────────────────── behind a proxy (e.g. Render) ─────────────────────────
 
 test('behind a TLS proxy: cookies are Secure, and rotating X-Forwarded-For cannot dodge login lockout', async () => {
-  const proxied = createApp({ dbPath: ':memory:', clock, trustProxy: true });
+  const proxied = createApp({ dbUrl: freshDb(), clock, trustProxy: true });
   await new Promise((r) => proxied.server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${proxied.server.address().port}`;
   const post = (path, body, headers = {}) =>
@@ -646,7 +650,7 @@ test('resetting a PIN clears a lockout so a parent can recover a locked-out kid'
   const kid = await newKid(parent, 'Lia', `lia${++seq}`);
   for (let i = 0; i < 10; i++) await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: 'nope-nope' });
   assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' })).status, 429);
-  for (const l of Object.values(app.limiters)) if (l !== app.limiters.loginAccount) l.entries.clear(); // isolate the per-account lock
+  for (const l of Object.values(app.limiters)) if (l !== app.limiters.loginAccount) await l.clear(); // isolate the per-account lock
   assert.equal((await parent.c.post(`/api/kids/${kid.id}/password`, { password: '654321' })).status, 200);
   assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '654321' })).status, 200);
 });
@@ -671,13 +675,13 @@ test('only allowances that can be due are loaded each tick', async () => {
   const kid = await newKid(parent, 'Dee', `dee${++seq}`);
   await fund(parent, 30000);
   await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 500, freq: 'monthly', day: 1, active: true } });
-  const plan = app.db.prepare("EXPLAIN QUERY PLAN SELECT * FROM kid_controls c WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL AND c.allowance_next <= ?").all('2026-10-12');
+  const plan = await app.db.all('EXPLAIN QUERY PLAN SELECT * FROM kid_controls c WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL AND c.allowance_next <= ?', ['2026-10-12']);
   assert.match(JSON.stringify(plan), /controls_due/);
-  assert.equal(payOut(kid).length, 0);
+  assert.equal((await payOut(kid)).length, 0);
 });
 
 test('behind a proxy only the entry the proxy added is trusted; client-supplied entries to the left are ignored', async () => {
-  const proxied = createApp({ dbPath: ':memory:', clock, trustProxy: 1 });
+  const proxied = createApp({ dbUrl: freshDb(), clock, trustProxy: 1 });
   await new Promise((r) => proxied.server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${proxied.server.address().port}`;
   try {
