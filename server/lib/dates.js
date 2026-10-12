@@ -13,8 +13,11 @@ export function parseYmd(s) {
 }
 
 /** Today's calendar date (YYYY-MM-DD) in the given IANA timezone. */
+const formatters = new Map();
 export function dateInZone(date, timeZone) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+  let f = formatters.get(timeZone);
+  if (!f) formatters.set(timeZone, (f = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })));
+  return f.format(date);
 }
 
 export function addDays(s, n) {

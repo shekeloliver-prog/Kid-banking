@@ -371,11 +371,13 @@ export function createBank(db, clock = () => new Date()) {
   /** Pays every allowance that is due. Safe to call as often as you like. */
   function runAllowances() {
     const now = clock();
+    // A calendar date in any time zone is within a day of the UTC date, so anything later than that can't be due yet.
+    const horizon = addDays(dateInZone(now, 'UTC'), 1);
     const rows = q(
       `SELECT c.*, k.name AS kid_name, k.parent_id, p.name AS parent_name, p.timezone
        FROM kid_controls c JOIN users k ON k.id = c.kid_id JOIN users p ON p.id = k.parent_id
-       WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL`,
-    ).all();
+       WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL AND c.allowance_next <= ?`,
+    ).all(horizon);
     const paid = [];
     for (const r of rows) {
       const today = dateInZone(now, r.timezone);

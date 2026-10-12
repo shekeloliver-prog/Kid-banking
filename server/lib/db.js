@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS kid_controls (
   allowance_fail_notified  TEXT
 );
 
+CREATE INDEX IF NOT EXISTS controls_due ON kid_controls(allowance_next) WHERE allowance_active = 1;
+
 CREATE TABLE IF NOT EXISTS transactions (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -2,7 +2,29 @@ import { scrypt as scryptCb, randomBytes, timingSafeEqual, createHash } from 'no
 import { promisify } from 'node:util';
 import { HttpError } from './util.js';
 
-const scrypt = promisify(scryptCb);
+const scryptRaw = promisify(scryptCb);
+
+// scrypt runs on libuv's small thread pool, which static file serving shares. Cap how many hashes run at
+// once (and how many may queue) so a flood of logins can't starve the whole server.
+const MAX_HASHING = 2;
+const MAX_WAITING = 64;
+let hashing = 0;
+const waiting = [];
+async function scrypt(...args) {
+  if (hashing >= MAX_HASHING) {
+    if (waiting.length >= MAX_WAITING) throw new HttpError(503, 'busy', 'Nestly is busy right now. Please try again in a moment.');
+    await new Promise((resolve) => waiting.push(resolve)); // the finishing job hands its slot straight to us
+  } else {
+    hashing++;
+  }
+  try {
+    return await scryptRaw(...args);
+  } finally {
+    const next = waiting.shift();
+    if (next) next();
+    else hashing--;
+  }
+}
 const N = 16384;
 const R = 8;
 const P = 1;
@@ -119,6 +141,24 @@ export class AttemptLimiter {
 
   reset(key) {
     this.entries.delete(key);
+  }
+
+  /**
+   * Check and count an attempt in one synchronous step, *before* any await. Counting only after a slow
+   * password check lets a burst of parallel guesses all pass the check first.
+   * Follow with reset() on success (or release() for shared keys).
+   */
+  reserve(key) {
+    this.assertAllowed(key);
+    this.fail(key);
+  }
+
+  /** Gives back one reserved attempt (used for shared keys like an IP when the attempt succeeded). */
+  release(key) {
+    const e = this.entries.get(key);
+    if (!e || e.lockedUntil > this.now()) return;
+    e.count = Math.max(0, e.count - 1);
+    if (e.count === 0) this.entries.delete(key);
   }
 
   prune() {

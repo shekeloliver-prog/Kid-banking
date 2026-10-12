@@ -39,7 +39,12 @@ export function parseCookies(header = '') {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    } catch {
+      /* a malformed cookie is ignored rather than failing the request */
+    }
   }
   return out;
 }
@@ -102,7 +107,11 @@ export class Router {
       pathMatched = true;
       if (r.method !== method) continue;
       const params = {};
-      r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      try {
+        r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      } catch {
+        throw new HttpError(400, 'bad_request', "That address isn't valid.");
+      }
       return { route: r, params };
     }
     return { route: null, pathMatched };

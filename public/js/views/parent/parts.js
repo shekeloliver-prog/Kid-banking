@@ -124,7 +124,7 @@ export function addKidDialog({ onDone }) {
   identity.name.input.addEventListener('input', () => {
     if (!touched) uname.input.value = identity.name.input.value.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20);
   });
-  const pin = passwordField({ label: 'PIN or password', hint: 'At least 4 characters. Easy for them to remember, hard to guess.', autocomplete: 'new-password' });
+  const pin = passwordField({ label: 'PIN or password', hint: 'At least 6 characters. Easy for them to remember, hard to guess.', autocomplete: 'new-password' });
   formModal({
     title: 'Add a kid',
     subtitle: 'They’ll get their own login and a safe place to save.',
@@ -154,7 +154,7 @@ export function editKidDialog(kid, onDone) {
 }
 
 export function resetPinDialog(kid) {
-  const pin = passwordField({ label: 'New PIN or password', autocomplete: 'new-password', autofocus: true, hint: 'At least 4 characters. They’ll be signed out everywhere.' });
+  const pin = passwordField({ label: 'New PIN or password', autocomplete: 'new-password', autofocus: true, hint: 'At least 6 characters. They’ll be signed out everywhere.' });
   formModal({
     title: `Reset ${kid.name}'s PIN`,
     fields: [pin.el],

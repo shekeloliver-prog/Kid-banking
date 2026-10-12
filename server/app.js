@@ -28,15 +28,27 @@ export function createApp({ dbPath, clock = () => new Date(), trustProxy = false
   };
   registerRoutes(router, { db, bank, limiters, clock });
 
+  // trustProxy is the number of proxies in front of us that we trust (true = 1). Each proxy appends the address
+  // it received the request from to X-Forwarded-For, so the trustworthy entry is `hops` from the RIGHT. Anything
+  // further left was supplied by the client and is ignored. If the count is too low, users merely share a
+  // rate-limit bucket (safe); too high would trust client-supplied values, so err low.
+  const hops = trustProxy === true ? 1 : Math.max(0, Math.floor(Number(trustProxy) || 0));
+  let loggedForwarded = false;
   const clientIp = (req) => {
-    if (trustProxy) {
-      const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-      if (fwd) return fwd;
+    if (hops > 0) {
+      const raw = String(req.headers['x-forwarded-for'] || '');
+      if (!loggedForwarded) {
+        loggedForwarded = true;
+        console.log(`[proxy] first request: x-forwarded-for="${raw}" (TRUST_PROXY=${hops}); if every visitor shares one IP, raise TRUST_PROXY`);
+      }
+      const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
+      if (parts.length >= hops) return parts[parts.length - hops];
     }
     return req.socket.remoteAddress || 'unknown';
   };
 
-  const isSecure = (req) => !!req.socket.encrypted || (trustProxy && req.headers['x-forwarded-proto'] === 'https');
+  const isSecure = (req) =>
+    !!req.socket.encrypted || (hops > 0 && String(req.headers['x-forwarded-proto'] || '').split(',').pop().trim() === 'https');
 
   async function handleApi(req, res, url) {
     const { route, params, pathMatched } = router.match(req.method, url.pathname);

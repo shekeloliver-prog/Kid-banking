@@ -26,8 +26,8 @@ Demo logins (`npm run demo`):
 | Who | Login | Password / PIN |
 | --- | --- | --- |
 | Parent (Sam) | `demo@nestly.app` | `nestly-demo` |
-| Kid (Mia) | `mia` | `1234` |
-| Kid (Leo) | `leo` | `1234` |
+| Kid (Mia) | `mia` | `123456` |
+| Kid (Leo) | `leo` | `123456` |
 
 To start fresh instead, run `npm start`, choose **Create an account**, and follow the
 three-step setup on the home page.
@@ -76,7 +76,11 @@ test/api.test.js    API tests (npm test)
 **Security**
 - Passwords hashed with scrypt; sessions are random tokens stored hashed, in `HttpOnly`, `SameSite=Lax` cookies
   (`Secure` automatically over HTTPS).
-- Login lockout after repeated failures; generic error messages, and unknown accounts cost the same time as wrong passwords.
+- Login lockout after repeated failures — attempts are counted *before* the slow password check, so a burst of
+  parallel guesses can't slip past the limit — plus a per-account limit that ignores the client IP; generic error
+  messages, and unknown accounts cost the same time as wrong passwords. Kid PINs are at least 6 characters, and
+  resetting a kid's PIN clears any lockout. Password hashing is capped at 2 concurrent jobs so a flood of logins
+  can't starve the server.
 - Every kid/parent route is authorised by ownership — a parent can only ever reach their own kids.
 - CSRF defence (Origin / `Sec-Fetch-Site` checks plus JSON-only bodies), a strict Content-Security-Policy
   (no inline script or style), and all user text is rendered with text nodes, never as HTML.
@@ -91,7 +95,7 @@ job that runs every 30 seconds. After downtime it pays one allowance, not a back
 | `PORT` | `3000` | Port to listen on |
 | `HOST` | `0.0.0.0` | Interface to bind |
 | `DB_PATH` | `data/nestly.db` | SQLite file |
-| `TRUST_PROXY` | _unset_ | Set to `1` behind a TLS-terminating proxy so cookies are `Secure` and client IPs are read from `X-Forwarded-For` |
+| `TRUST_PROXY` | `0` | Number of trusted proxies in front of the app (see *Deploy*). Makes cookies `Secure` behind TLS and reads client IPs from `X-Forwarded-For` |
 
 ## Deploy to Render
 
@@ -109,8 +113,12 @@ Notes:
 - The disk needs a paid instance (the Blueprint uses `starter`). Without a disk, data is lost on every restart.
 - Don't run `npm run demo` in production — it publishes known demo logins.
 - Back up `/var/data/nestly.db` (Render disk snapshots, or `sqlite3 nestly.db ".backup out.db"`).
-- Keep `TRUST_PROXY=1` only behind a proxy you control. Per-account login lockout does not depend on
-  the client IP, but the per-IP limits do.
+- `TRUST_PROXY` is the **number of proxies in front of the app** (`1` = trust one). The client IP is read that many
+  entries from the *right* of `X-Forwarded-For`, because everything further left is client-supplied. The first
+  request after each start logs the header it saw (`[proxy] first request: …`). If every visitor ends up sharing
+  one IP — e.g. you see "Too many attempts" for different people at once — Render has more than one proxy hop in
+  front of you, so raise it to `2`. Never set it higher than the real number of hops. Per-account login lockout
+  doesn't depend on the client IP at all.
 
 ## Tests
 

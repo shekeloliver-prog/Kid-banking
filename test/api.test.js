@@ -59,10 +59,10 @@ async function newParent(name = 'Sam') {
 }
 
 async function newKid(parent, name = 'Mia', username = `kid${++seq}`) {
-  const r = await parent.c.post('/api/kids', { name, username, password: '1234', avatar: '🦊', color: 'blue' });
+  const r = await parent.c.post('/api/kids', { name, username, password: '123456', avatar: '🦊', color: 'blue' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const kc = new Client();
-  const login = await kc.post('/api/auth/login', { role: 'kid', identifier: username, password: '1234' });
+  const login = await kc.post('/api/auth/login', { role: 'kid', identifier: username, password: '123456' });
   assert.equal(login.status, 200, JSON.stringify(login.body));
   return { id: r.body.id, c: kc, username };
 }
@@ -74,7 +74,7 @@ const payOut = (kid) => app.bank.runAllowances().filter((p) => p.kidId === kid.i
 // Sessions last 7 days, so after a big time jump a kid has to log in again.
 async function relogin(kid) {
   kid.c = new Client();
-  const r = await kid.c.post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '1234' });
+  const r = await kid.c.post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' });
   assert.equal(r.status, 200);
 }
 
@@ -179,7 +179,7 @@ test('kids log in with their own role and cannot use parent routes', async () =>
   assert.equal((await kid.c.post(`/api/kids/${kid.id}/send`, { amountCents: 1000 })).status, 403);
   assert.equal((await parent.c.get('/api/kid/overview')).status, 403);
   // A kid username can't be used on the parent login and vice versa.
-  const wrongTab = await new Client().post('/api/auth/login', { role: 'parent', identifier: kid.username, password: '1234' });
+  const wrongTab = await new Client().post('/api/auth/login', { role: 'parent', identifier: kid.username, password: '123456' });
   assert.equal(wrongTab.status, 401);
 });
 
@@ -518,17 +518,17 @@ test('removing a kid needs the parent password and returns all their money', asy
   assert.equal(overview.balanceCents, 10000);
   assert.equal(overview.kids.length, 0);
   assert.equal((await kid.c.get('/api/kid/overview')).status, 401); // their session is gone
-  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '1234' })).status, 401);
+  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' })).status, 401);
   assertLedgerBalanced();
 });
 
 test('resetting a PIN signs the kid out and the new PIN works', async () => {
   const parent = await newParent();
   const kid = await newKid(parent);
-  assert.equal((await parent.c.post(`/api/kids/${kid.id}/password`, { password: '99' })).status, 400);
+  assert.equal((await parent.c.post(`/api/kids/${kid.id}/password`, { password: '12345' })).status, 400); // PINs are at least 6 characters
   assert.equal((await parent.c.post(`/api/kids/${kid.id}/password`, { password: '987654' })).status, 200);
   assert.equal((await kid.c.get('/api/kid/overview')).status, 401);
-  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '1234' })).status, 401);
+  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' })).status, 401);
   assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '987654' })).status, 200);
 });
 
@@ -536,11 +536,11 @@ test('usernames are unique and validated', async () => {
   const a = await newParent();
   const b = await newParent();
   await newKid(a, 'Mia', 'sparkle_mia');
-  const dupe = await b.c.post('/api/kids', { name: 'Other', username: 'SPARKLE_MIA', password: '1234' });
+  const dupe = await b.c.post('/api/kids', { name: 'Other', username: 'SPARKLE_MIA', password: '123456' });
   assert.equal(dupe.status, 409);
-  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'a b', password: '1234' })).status, 400);
-  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'okname', password: '12' })).status, 400);
-  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'okname', password: '1234', avatar: '<script>' })).status, 400);
+  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'a b', password: '123456' })).status, 400);
+  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'okname', password: '12345' })).status, 400);
+  assert.equal((await b.c.post('/api/kids', { name: 'X', username: 'okname', password: '123456', avatar: '<script>' })).status, 400);
 });
 
 // ───────────────────────── activity + notifications ─────────────────────────
@@ -608,6 +608,91 @@ test('behind a TLS proxy: cookies are Secure, and rotating X-Forwarded-For canno
     assert.ok(locked, 'account locked despite a different client IP on every attempt');
     const right = await post('/api/auth/login', { role: 'parent', identifier: 'proxy@example.com', password: 'correct-horse-battery' }, { 'x-forwarded-for': '198.51.100.250' });
     assert.equal(right.status, 429);
+  } finally {
+    await proxied.close();
+  }
+});
+
+// ───────────────────────── hardening from the pre-deploy review ─────────────────────────
+
+test('a burst of parallel guesses cannot slip past the lockout', async () => {
+  const parent = await newParent();
+  const kid = await newKid(parent, 'Mia', `racer${++seq}`);
+  await app.bank.getUser(kid.id);
+  // The real PIN is 123456; fire 400 guesses at once, with the correct one buried deep in the list.
+  const guesses = Array.from({ length: 400 }, (_, i) => String(100000 + i));
+  guesses[300] = '123456';
+  const results = await Promise.all(
+    guesses.map((pin) => new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: pin })),
+  );
+  const tally = {};
+  for (const r of results) tally[r.status] = (tally[r.status] ?? 0) + 1;
+  assert.ok((tally[401] ?? 0) <= 5, `only the per-account/IP allowance may be evaluated, got ${JSON.stringify(tally)}`);
+  assert.equal(tally[200] ?? 0, 0, 'the buried correct PIN must not get through');
+  assert.ok((tally[429] ?? 0) >= 390);
+});
+
+test('a successful login gives its attempt back, so normal use never trips the limits', async () => {
+  const parent = await newParent();
+  const kid = await newKid(parent, 'Zed', `zed${++seq}`);
+  for (let i = 0; i < 30; i++) {
+    const r = await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' });
+    assert.equal(r.status, 200);
+  }
+});
+
+test('resetting a PIN clears a lockout so a parent can recover a locked-out kid', async () => {
+  const parent = await newParent();
+  const kid = await newKid(parent, 'Lia', `lia${++seq}`);
+  for (let i = 0; i < 10; i++) await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: 'nope-nope' });
+  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '123456' })).status, 429);
+  for (const l of Object.values(app.limiters)) if (l !== app.limiters.loginAccount) l.entries.clear(); // isolate the per-account lock
+  assert.equal((await parent.c.post(`/api/kids/${kid.id}/password`, { password: '654321' })).status, 200);
+  assert.equal((await new Client().post('/api/auth/login', { role: 'kid', identifier: kid.username, password: '654321' })).status, 200);
+});
+
+test('malformed percent-escapes are a clean 4xx, not a 500', async () => {
+  const bad = await fetch(base + '/api/session', { headers: { cookie: 'nestly_session=%E0%A4%A' } });
+  assert.equal(bad.status, 200);
+  assert.equal((await bad.json()).user, null);
+  const parent = await newParent();
+  const r = await parent.c.get('/api/kids/%E0%A4%A');
+  assert.equal(r.status, 400);
+});
+
+test('two sign-ups racing for one email produce one account and one clean 409', async () => {
+  const body = { name: 'Racer', email: `race${++seq}@example.com`, password: 'correct-horse-battery' };
+  const results = await Promise.all([new Client().post('/api/auth/register', body), new Client().post('/api/auth/register', body)]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
+});
+
+test('only allowances that can be due are loaded each tick', async () => {
+  const parent = await newParent();
+  const kid = await newKid(parent, 'Dee', `dee${++seq}`);
+  await fund(parent, 30000);
+  await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 500, freq: 'monthly', day: 1, active: true } });
+  const plan = app.db.prepare("EXPLAIN QUERY PLAN SELECT * FROM kid_controls c WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL AND c.allowance_next <= ?").all('2026-10-12');
+  assert.match(JSON.stringify(plan), /controls_due/);
+  assert.equal(payOut(kid).length, 0);
+});
+
+test('behind a proxy only the entry the proxy added is trusted; client-supplied entries to the left are ignored', async () => {
+  const proxied = createApp({ dbPath: ':memory:', clock, trustProxy: 1 });
+  await new Promise((r) => proxied.server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${proxied.server.address().port}`;
+  try {
+    const statuses = [];
+    for (let i = 0; i < 20; i++) {
+      // The attacker rotates the leftmost value; the proxy appends the true peer (198.51.100.77) on the right.
+      const r = await fetch(url + '/api/auth/register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': `10.9.9.${i}, 198.51.100.77` },
+        body: JSON.stringify({ name: 'S', email: `spam${i}@example.com`, password: 'correct-horse-battery' }),
+      });
+      statuses.push(r.status);
+    }
+    assert.equal(statuses.filter((s) => s === 200).length, 15);
+    assert.equal(statuses.filter((s) => s === 429).length, 5);
   } finally {
     await proxied.close();
   }

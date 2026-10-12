@@ -99,7 +99,7 @@ export function notificationsBell() {
 function changePasswordDialog(user) {
   const isKid = user.role === 'kid';
   const cur = passwordField({ label: isKid ? 'Current PIN' : 'Current password', autofocus: true });
-  const next = passwordField({ label: isKid ? 'New PIN' : 'New password', autocomplete: 'new-password', hint: isKid ? 'At least 4 characters.' : 'At least 8 characters.' });
+  const next = passwordField({ label: isKid ? 'New PIN' : 'New password', autocomplete: 'new-password', hint: isKid ? 'At least 6 characters.' : 'At least 8 characters.' });
   formModal({
     title: isKid ? 'Change my PIN' : 'Change password',
     subtitle: 'You’ll stay signed in here and be signed out everywhere else.',

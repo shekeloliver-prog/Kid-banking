@@ -1,6 +1,8 @@
 import { HttpError, text, cents, oneOf, password, email, username, id, timezone, AVATARS, COLORS, CATEGORIES } from './lib/util.js';
 import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions } from './lib/auth.js';
 
+const KID_PIN_MIN = 6;
+
 // Auth levels: null = public, 'parent' | 'kid' = that role only, 'user' = any signed-in account.
 export function registerRoutes(router, { db, bank, limiters, clock }) {
   const get = (path, auth, fn) => router.add('GET', path, { auth }, fn);
@@ -26,12 +28,9 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
   /** Checks a password the user typed to confirm a sensitive action, with brute-force protection. */
   async function confirmPassword(ctx, plain) {
     const key = `confirm:${ctx.user.id}`;
-    limiters.login.assertAllowed(key);
+    limiters.login.reserve(key);
     const ok = typeof plain === 'string' && (await verifyPassword(plain, ctx.user.password_hash));
-    if (!ok) {
-      limiters.login.fail(key);
-      throw new HttpError(403, 'wrong_password', "That password isn't right.");
-    }
+    if (!ok) throw new HttpError(403, 'wrong_password', "That password isn't right.");
     limiters.login.reset(key);
   }
 
@@ -54,12 +53,19 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
       throw new HttpError(409, 'email_taken', 'An account with that email already exists. Try logging in.');
     }
     const hash = await hashPassword(pw);
-    const info = db
-      .prepare(
-        `INSERT INTO users (role, name, email, password_hash, avatar, color, timezone, created_at)
-         VALUES ('parent', ?, ?, ?, '🧑', 'violet', ?, ?)`,
-      )
-      .run(name, mail, hash, timezone(ctx.body.timezone), clock().toISOString());
+    let info;
+    try {
+      info = db
+        .prepare(
+          `INSERT INTO users (role, name, email, password_hash, avatar, color, timezone, created_at)
+           VALUES ('parent', ?, ?, ?, '🧑', 'violet', ?, ?)`,
+        )
+        .run(name, mail, hash, timezone(ctx.body.timezone), clock().toISOString());
+    } catch (err) {
+      // Two sign-ups for the same email can both pass the check above while hashing; the UNIQUE index catches the loser.
+      if (/UNIQUE/i.test(String(err?.message))) throw new HttpError(409, 'email_taken', 'An account with that email already exists. Try logging in.');
+      throw err;
+    }
     const user = bank.getUser(Number(info.lastInsertRowid));
     await startSession(ctx, user);
     return { user: userDto(user), unread: 0 };
@@ -74,9 +80,10 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     const key = `login:${ctx.ip}:${role}:${identifier}`;
     const ipKey = `login-ip:${ctx.ip}`;
     const acctKey = `login-acct:${role}:${identifier}`;
-    limiters.login.assertAllowed(key);
-    limiters.loginAccount.assertAllowed(acctKey);
-    limiters.loginIp.assertAllowed(ipKey);
+    // Reserve a slot on all three limiters synchronously, before the slow hash, so parallel guesses can't race past the limit.
+    limiters.login.reserve(key);
+    limiters.loginAccount.reserve(acctKey);
+    limiters.loginIp.reserve(ipKey);
 
     const user =
       role === 'parent'
@@ -86,13 +93,11 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     if (user) ok = await verifyPassword(ctx.body.password, user.password_hash);
     else await burnPasswordCheck(ctx.body.password);
     if (!ok) {
-      limiters.login.fail(key);
-      limiters.loginIp.fail(ipKey);
-      limiters.loginAccount.fail(acctKey);
       throw new HttpError(401, 'bad_credentials', role === 'parent' ? 'Incorrect email or password.' : 'Incorrect username or PIN.');
     }
     limiters.login.reset(key);
     limiters.loginAccount.reset(acctKey);
+    limiters.loginIp.release(ipKey);
     await startSession(ctx, user);
     return { user: userDto(user), unread: bank.unreadCount(user.id) };
   });
@@ -129,7 +134,7 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
 
   post('/api/auth/password', 'user', async (ctx) => {
     await confirmPassword(ctx, ctx.body.current);
-    const next = password(ctx.body.next, { min: ctx.user.role === 'parent' ? 8 : 4, field: ctx.user.role === 'parent' ? 'New password' : 'New PIN' });
+    const next = password(ctx.body.next, { min: ctx.user.role === 'parent' ? 8 : KID_PIN_MIN, field: ctx.user.role === 'parent' ? 'New password' : 'New PIN' });
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(next), ctx.user.id);
     destroyUserSessions(db, ctx.user.id, ctx.token);
     return { ok: true };
@@ -153,7 +158,7 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
   post('/api/kids', 'parent', async (ctx) => {
     const name = text(ctx.body.name, { field: 'Name', max: 40 });
     const uname = username(ctx.body.username);
-    const pin = password(ctx.body.password, { min: 4, field: 'PIN' });
+    const pin = password(ctx.body.password, { min: KID_PIN_MIN, field: 'PIN' });
     const avatar = oneOf(ctx.body.avatar ?? AVATARS[0], AVATARS, { field: 'Avatar' });
     const color = oneOf(ctx.body.color ?? COLORS[0], COLORS, { field: 'Color' });
     const hash = await hashPassword(pin);
@@ -175,9 +180,12 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
   post('/api/kids/:id/password', 'parent', async (ctx) => {
     const kidId = id(ctx.params.id);
     bank.ownKid(ctx.user.id, kidId);
-    const pin = password(ctx.body.password, { min: 4, field: 'PIN' });
+    const pin = password(ctx.body.password, { min: KID_PIN_MIN, field: 'PIN' });
+    const kid = bank.getUser(kidId);
     db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(pin), kidId);
     destroyUserSessions(db, kidId);
+    // A parent resetting the PIN is the recovery path if someone locked the kid out.
+    limiters.loginAccount.reset(`login-acct:kid:${kid.username}`);
     return { ok: true };
   });
 

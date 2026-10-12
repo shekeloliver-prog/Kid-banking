@@ -27,7 +27,7 @@ const parentInfo = db
   .prepare("INSERT INTO users (role, name, email, password_hash, avatar, color, timezone, created_at) VALUES ('parent', 'Sam Rivera', 'demo@nestly.app', ?, '🧑', 'violet', ?, ?)")
   .run(await hashPassword('nestly-demo'), zone, new Date(clockMs).toISOString());
 const parent = bank.getUser(Number(parentInfo.lastInsertRowid));
-const kidHash = await hashPassword('1234');
+const kidHash = await hashPassword('123456');
 
 const mia = bank.createKid(parent, { name: 'Mia', username: 'mia', passwordHash: kidHash, avatar: '🦄', color: 'pink' });
 const leo = bank.createKid(parent, { name: 'Leo', username: 'leo', passwordHash: kidHash, avatar: '🐼', color: 'teal' });
