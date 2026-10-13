@@ -7,6 +7,13 @@ export class ApiError extends Error {
   }
 }
 
+// A reply that isn't one of Nestly's own JSON errors came from the hosting platform (or an older deployment).
+function describeUnexpected(status) {
+  if (status === 404) return "Nestly's server isn't answering at this address (error 404). If you just deployed, make sure the latest version is live.";
+  if (status >= 500) return `The server hit an error (${status}). If you just deployed, check the deployment logs and that the database settings are in place.`;
+  return `Something unexpected happened (error ${status}). Please try again.`;
+}
+
 async function request(method, path, body) {
   let res;
   try {
@@ -26,7 +33,7 @@ async function request(method, path, body) {
       window.dispatchEvent(new Event('nestly:signed-out'));
     }
     const { code, message, ...details } = e;
-    throw new ApiError(res.status, code ?? 'error', message ?? 'Something went wrong. Please try again.', details);
+    throw new ApiError(res.status, code ?? 'error', message ?? describeUnexpected(res.status), details);
   }
   return data;
 }

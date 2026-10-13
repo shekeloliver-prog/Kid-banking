@@ -105,6 +105,7 @@ function showSetupProblem(err) {
         h('div', { class: 'art', 'aria-hidden': 'true' }, err.code === 'not_configured' ? '🛠️' : '😕'),
         h('h3', null, err.code === 'not_configured' ? 'Nestly isn’t set up yet' : 'Can’t reach Nestly right now'),
         h('p', null, err.message),
+        err.status ? h('p', { class: 'tiny muted' }, `Details: ${err.code ?? 'error'} · status ${err.status}`) : null,
         h('button', { class: 'btn btn-primary', onClick: () => location.reload() }, 'Try again'),
       ),
     ),
@@ -117,7 +118,8 @@ function showSetupProblem(err) {
     if (session.user) mountApp(session);
     else showAuth();
   } catch (err) {
-    if (err.status === 503 || err.status === 0) showSetupProblem(err);
-    else showAuth();
+    // /api/session is public and always answers 200 when the server is healthy, so ANY failure here means the
+    // server side isn't working. Say so, rather than showing a sign-in form that can't succeed.
+    showSetupProblem(err);
   }
 })();
