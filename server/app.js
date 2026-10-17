@@ -27,7 +27,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
     register: new AttemptLimiter(db, { name: 'register', max: 15, lockMs: 60 * 60 * 1000 }),
     confirm: new AttemptLimiter(db, { name: 'confirm', max: 5, lockMs: 5 * 60 * 1000 }),
   };
-  registerRoutes(router, { db, bank, limiters, clock, cronSecret });
+  registerRoutes(router, { db, bank, limiters, clock, cronSecret, dbScheme: String(dbUrl).split(':')[0] });
 
   // Serverless hosts have no background timer, so allowances are also paid opportunistically as people use the app.
   let lastLazyRun = 0;
@@ -143,7 +143,8 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
         if (!res.headersSent) sendJson(res, err.status, { error: { code: err.code, message: err.message, ...(err.details ?? {}) } });
       } else {
         console.error(err);
-        if (!res.headersSent) sendJson(res, 500, { error: { code: 'server_error', message: 'Something went wrong on our side. Please try again.' } });
+        // The error's class/code (never its message) helps whoever runs the deployment find the cause quickly.
+        if (!res.headersSent) sendJson(res, 500, { error: { code: 'server_error', message: 'Something went wrong on our side. Please try again.', detail: String(err?.code ?? err?.name ?? 'Error').slice(0, 60) } });
       }
     }
   }

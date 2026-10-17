@@ -10,11 +10,20 @@ import { join } from 'node:path';
 export function databaseFromEnv(env, { root, demo = false } = {}) {
   if (demo) return { url: `file:${join(root, 'data', 'demo.db')}` };
   const turso = String(env.TURSO_DATABASE_URL ?? '').trim();
-  if (turso) return { url: turso, authToken: String(env.TURSO_AUTH_TOKEN ?? '').trim() || undefined };
+  if (turso) return { url: httpTransport(turso), authToken: String(env.TURSO_AUTH_TOKEN ?? '').trim() || undefined };
   const path = String(env.DB_PATH ?? '').trim();
   if (path) return { url: `file:${path}` };
   if (env.VERCEL || env.RENDER) return null;
   return { url: `file:${join(root, 'data', 'nestly.db')}` };
+}
+
+/**
+ * libsql:// URLs make the client hold a WebSocket open, which goes stale while a serverless function is frozen
+ * between requests. Turso recommends plain HTTPS for serverless and it behaves identically for us (including
+ * transactions), so use it for every remote database.
+ */
+export function httpTransport(url) {
+  return url.replace(/^(libsql|wss?):\/\//i, 'https://');
 }
 
 /** TRUST_PROXY = number of trusted proxies in front of the app (0 = none). */

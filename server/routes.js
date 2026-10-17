@@ -5,7 +5,7 @@ import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroy
 const KID_PIN_MIN = 6;
 
 // Auth levels: null = public, 'parent' | 'kid' = that role only, 'user' = any signed-in account.
-export function registerRoutes(router, { db, bank, limiters, clock, cronSecret }) {
+export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, dbScheme }) {
   const get = (path, auth, fn) => router.add('GET', path, { auth }, fn);
   const post = (path, auth, fn) => router.add('POST', path, { auth }, fn);
   const put = (path, auth, fn) => router.add('PUT', path, { auth }, fn);
@@ -50,6 +50,54 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret }
 
   // ───────────── health ─────────────
   get('/api/health', null, () => ({ ok: true }));
+
+  // ───────────── self-check ─────────────
+  // Runs the same kinds of steps a sign-in does and reports which one fails, so a broken deployment can be
+  // diagnosed without log access. Reports only booleans and sanitised error text — never secrets or data.
+  const clean = (err) =>
+    `${err?.code ?? err?.name ?? 'Error'}: ${String(err?.message ?? err)
+      .replace(/\b(?:libsql|https?|wss?|file):\/\/\S+/gi, '<url>')
+      .replace(/[A-Za-z0-9_\-.]{36,}/g, '<redacted>')
+      .slice(0, 220)}`;
+  let lastDiagnose = 0;
+  get('/api/diagnose', null, async () => {
+    if (Date.now() - lastDiagnose < 3000) throw new HttpError(429, 'slow_down', 'Try again in a few seconds.');
+    lastDiagnose = Date.now();
+    const out = {
+      ok: true,
+      node: process.version,
+      platform: process.env.VERCEL ? 'vercel' : process.env.RENDER ? 'render' : 'other',
+      region: process.env.VERCEL_REGION ?? null,
+      database: dbScheme,
+      env: { TURSO_DATABASE_URL: !!process.env.TURSO_DATABASE_URL, TURSO_AUTH_TOKEN: !!process.env.TURSO_AUTH_TOKEN, CRON_SECRET: !!process.env.CRON_SECRET },
+      steps: [],
+    };
+    const step = async (name, fn) => {
+      const started = Date.now();
+      try {
+        await fn();
+        out.steps.push({ name, ok: true, ms: Date.now() - started });
+      } catch (err) {
+        out.ok = false;
+        out.steps.push({ name, ok: false, ms: Date.now() - started, error: clean(err) });
+      }
+    };
+    await step('database setup', () => db.ensureReady());
+    await step('read', () => db.get('SELECT COUNT(*) AS n FROM users'));
+    await step('write transaction (rolled back)', async () => {
+      const undo = new Error('rollback');
+      try {
+        await db.atomic(async () => {
+          await db.run("INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES ('diagnose', 0, 0, 0)");
+          throw undo;
+        });
+      } catch (err) {
+        if (err !== undo) throw err;
+      }
+    });
+    await step('password hashing', () => hashPassword('diagnostic'));
+    return out;
+  });
 
   // ───────────── scheduled jobs ─────────────
   // Hosts without a long-running process (e.g. Vercel) call this on a schedule. It also runs opportunistically

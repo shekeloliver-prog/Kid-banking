@@ -138,6 +138,12 @@ Preview deployments (branches) use the **Preview** environment's variables, so a
    If the database variables are missing the service refuses to start (and says why in its logs) rather than quietly
    storing data on a disk that is wiped on every restart.
 
+### If something doesn't work
+Open `https://<your-site>/api/diagnose`. It runs the same steps a sign-in does against your real database
+(setup, read, write, password hashing) and shows which one fails, with secrets redacted. Server errors also show a
+short code in brackets, e.g. `(SERVER_ERROR)`. Remote database URLs are always used over HTTPS (`libsql://` is
+rewritten to `https://`), which is what serverless hosts need.
+
 ### How allowances work without an always-on server
 There's no background process on these hosts, so allowances are paid (a) by a daily cron on Vercel,
 (b) whenever someone opens the app (checked at most once a minute), and (c) on every wake-up on Render.

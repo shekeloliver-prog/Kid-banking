@@ -33,7 +33,8 @@ async function request(method, path, body) {
       window.dispatchEvent(new Event('nestly:signed-out'));
     }
     const { code, message, ...details } = e;
-    throw new ApiError(res.status, code ?? 'error', message ?? describeUnexpected(res.status), details);
+    const shown = message ?? describeUnexpected(res.status);
+    throw new ApiError(res.status, code ?? 'error', res.status >= 500 && details.detail ? `${shown} (${details.detail})` : shown, details);
   }
   return data;
 }

@@ -4,7 +4,7 @@ import { createApp } from '../server/app.js';
 import { Db, openDb } from '../server/lib/db.js';
 import { ipKey } from '../server/lib/auth.js';
 import { restoreApiUrl } from '../server/lib/http.js';
-import { databaseFromEnv } from '../server/config.js';
+import { databaseFromEnv, httpTransport } from '../server/config.js';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -782,7 +782,7 @@ test('Vercel rewrite: the original API path is restored whichever URL form the f
 
 test('hosts with an ephemeral disk refuse to silently use a local database file', () => {
   const root = '/srv/app';
-  assert.deepEqual(databaseFromEnv({ TURSO_DATABASE_URL: ' libsql://x.turso.io ', TURSO_AUTH_TOKEN: 't' }, { root }), { url: 'libsql://x.turso.io', authToken: 't' });
+  assert.deepEqual(databaseFromEnv({ TURSO_DATABASE_URL: ' libsql://x.turso.io ', TURSO_AUTH_TOKEN: 't' }, { root }), { url: 'https://x.turso.io', authToken: 't' });
   assert.equal(databaseFromEnv({ VERCEL: '1' }, { root }), null);
   assert.equal(databaseFromEnv({ RENDER: 'true' }, { root }), null);
   assert.equal(databaseFromEnv({ RENDER: 'true', TURSO_DATABASE_URL: '', TURSO_AUTH_TOKEN: '' }, { root }), null);
@@ -803,4 +803,42 @@ test('the cron endpoint also purges expired sessions and stale limiter rows', as
     await cronApp.close();
   }
   void parent;
+});
+
+test('remote database URLs use HTTPS transport; local files are left alone', () => {
+  assert.equal(httpTransport('libsql://db-name-org.turso.io'), 'https://db-name-org.turso.io');
+  assert.equal(httpTransport('wss://db.turso.io'), 'https://db.turso.io');
+  assert.equal(httpTransport('https://db.turso.io'), 'https://db.turso.io');
+  assert.equal(httpTransport('file:/tmp/x.db'), 'file:/tmp/x.db');
+  assert.equal(databaseFromEnv({ TURSO_DATABASE_URL: 'libsql://a.turso.io', TURSO_AUTH_TOKEN: 't' }, { root: '/x' }).url, 'https://a.turso.io');
+});
+
+test('/api/diagnose reports each step and never leaks secrets', async () => {
+  const r = await new Client().get('/api/diagnose');
+  assert.equal(r.status, 200);
+  assert.equal(r.body.ok, true);
+  assert.deepEqual(r.body.steps.map((s) => s.name), ['database setup', 'read', 'write transaction (rolled back)', 'password hashing']);
+  assert.ok(r.body.steps.every((s) => s.ok));
+  assert.equal(typeof r.body.env.TURSO_AUTH_TOKEN, 'boolean');
+  assert.doesNotMatch(r.raw, /scrypt|password_hash|nestly-test/);
+  assert.equal((await new Client().get('/api/diagnose')).status, 429); // throttled
+  assert.equal((await app.db.get("SELECT COUNT(*) AS n FROM rate_limits WHERE key = 'diagnose'")).n, 0); // the probe write was rolled back
+});
+
+test('an unexpected server error reports only its class/code, not its message', async () => {
+  const parent = await newParent();
+  const original = app.bank.parentOverview;
+  app.bank.parentOverview = async () => {
+    const e = new Error('secret connection string libsql://x.turso.io?authToken=abc');
+    e.code = 'SERVER_ERROR';
+    throw e;
+  };
+  try {
+    const r = await parent.c.get('/api/parent/overview');
+    assert.equal(r.status, 500);
+    assert.equal(r.body.error.detail, 'SERVER_ERROR');
+    assert.doesNotMatch(r.raw, /turso|authToken|secret connection/);
+  } finally {
+    app.bank.parentOverview = original;
+  }
 });
