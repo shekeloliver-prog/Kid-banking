@@ -1,10 +1,11 @@
+import { timingSafeEqual } from 'node:crypto';
 import { HttpError, text, cents, oneOf, password, email, username, id, timezone, AVATARS, COLORS, CATEGORIES } from './lib/util.js';
-import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions } from './lib/auth.js';
+import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions, purgeExpiredSessions, AttemptLimiter } from './lib/auth.js';
 
 const KID_PIN_MIN = 6;
 
 // Auth levels: null = public, 'parent' | 'kid' = that role only, 'user' = any signed-in account.
-export function registerRoutes(router, { db, bank, limiters, clock }) {
+export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, dbScheme }) {
   const get = (path, auth, fn) => router.add('GET', path, { auth }, fn);
   const post = (path, auth, fn) => router.add('POST', path, { auth }, fn);
   const put = (path, auth, fn) => router.add('PUT', path, { auth }, fn);
@@ -25,48 +26,115 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
   const note = (v) => text(v, { field: 'Note', max: 140, optional: true });
   const positive = (v, field = 'Amount') => cents(v, { field });
 
+  /** Counts an attempt on several limiters in one transaction, before any slow work (see AttemptLimiter). */
+  const reserveAll = (pairs) => AttemptLimiter.reserveMany(db, pairs);
+
   /** Checks a password the user typed to confirm a sensitive action, with brute-force protection. */
   async function confirmPassword(ctx, plain) {
-    const key = `confirm:${ctx.user.id}`;
-    limiters.login.reserve(key);
+    const key = `${ctx.user.id}`;
+    await limiters.confirm.reserve(key);
     const ok = typeof plain === 'string' && (await verifyPassword(plain, ctx.user.password_hash));
     if (!ok) throw new HttpError(403, 'wrong_password', "That password isn't right.");
-    limiters.login.reset(key);
+    await limiters.confirm.reset(key);
   }
 
   async function startSession(ctx, user) {
-    const { token, expires } = createSession(db, user.id, clock());
+    const { token, expires } = await createSession(db, user.id, clock());
     ctx.setSession(token, expires);
   }
+
+  const counts = async (user) => {
+    const [unread, pending] = await Promise.all([bank.unreadCount(user.id), user.role === 'parent' ? bank.pendingRequestCount(user.id) : 0]);
+    return { unread, pending };
+  };
 
   // ───────────── health ─────────────
   get('/api/health', null, () => ({ ok: true }));
 
+  // ───────────── self-check ─────────────
+  // Runs the same kinds of steps a sign-in does and reports which one fails, so a broken deployment can be
+  // diagnosed without log access. Reports only booleans and sanitised error text — never secrets or data.
+  const clean = (err) =>
+    `${err?.code ?? err?.name ?? 'Error'}: ${String(err?.message ?? err)
+      .replace(/\b(?:libsql|https?|wss?|file):\/\/\S+/gi, '<url>')
+      .replace(/[A-Za-z0-9_\-.]{36,}/g, '<redacted>')
+      .slice(0, 220)}`;
+  let lastDiagnose = 0;
+  get('/api/diagnose', null, async () => {
+    if (Date.now() - lastDiagnose < 3000) throw new HttpError(429, 'slow_down', 'Try again in a few seconds.');
+    lastDiagnose = Date.now();
+    const out = {
+      ok: true,
+      node: process.version,
+      platform: process.env.VERCEL ? 'vercel' : process.env.RENDER ? 'render' : 'other',
+      region: process.env.VERCEL_REGION ?? null,
+      database: dbScheme,
+      env: { TURSO_DATABASE_URL: !!process.env.TURSO_DATABASE_URL, TURSO_AUTH_TOKEN: !!process.env.TURSO_AUTH_TOKEN, CRON_SECRET: !!process.env.CRON_SECRET },
+      steps: [],
+    };
+    const step = async (name, fn) => {
+      const started = Date.now();
+      try {
+        await fn();
+        out.steps.push({ name, ok: true, ms: Date.now() - started });
+      } catch (err) {
+        out.ok = false;
+        out.steps.push({ name, ok: false, ms: Date.now() - started, error: clean(err) });
+      }
+    };
+    await step('database setup', () => db.ensureReady());
+    await step('read', () => db.get('SELECT COUNT(*) AS n FROM users'));
+    await step('write transaction (rolled back)', async () => {
+      const undo = new Error('rollback');
+      try {
+        await db.atomic(async () => {
+          await db.run("INSERT INTO rate_limits (key, count, locked_until, updated_at) VALUES ('diagnose', 0, 0, 0)");
+          throw undo;
+        });
+      } catch (err) {
+        if (err !== undo) throw err;
+      }
+    });
+    await step('password hashing', () => hashPassword('diagnostic'));
+    return out;
+  });
+
+  // ───────────── scheduled jobs ─────────────
+  // Hosts without a long-running process (e.g. Vercel) call this on a schedule. It also runs opportunistically
+  // while people use the app, so allowances still land on time if the schedule is coarse.
+  get('/api/cron/allowances', null, async (ctx) => {
+    const header = String(ctx.req.headers.authorization ?? '');
+    const expected = `Bearer ${cronSecret ?? ''}`;
+    const a = Buffer.from(header);
+    const b = Buffer.from(expected);
+    if (!cronSecret || a.length !== b.length || !timingSafeEqual(a, b)) throw new HttpError(401, 'unauthenticated', 'Not allowed.');
+    const paid = await bank.runAllowances();
+    await purgeExpiredSessions(db, clock());
+    return { paid: paid.length };
+  });
+
   // ───────────── auth ─────────────
   post('/api/auth/register', null, async (ctx) => {
-    limiters.register.assertAllowed(ctx.ip);
-    limiters.register.fail(ctx.ip); // every attempt counts toward the hourly cap
+    await limiters.register.reserve(ctx.ip); // every attempt counts toward the hourly cap
     const name = text(ctx.body.name, { field: 'Name', max: 60 });
     const mail = email(ctx.body.email);
     const pw = password(ctx.body.password, { min: 8 });
-    if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(mail)) {
-      throw new HttpError(409, 'email_taken', 'An account with that email already exists. Try logging in.');
-    }
+    const taken = new HttpError(409, 'email_taken', 'An account with that email already exists. Try logging in.');
+    if (await db.get('SELECT 1 AS x FROM users WHERE email = ?', [mail])) throw taken;
     const hash = await hashPassword(pw);
     let info;
     try {
-      info = db
-        .prepare(
-          `INSERT INTO users (role, name, email, password_hash, avatar, color, timezone, created_at)
-           VALUES ('parent', ?, ?, ?, '🧑', 'violet', ?, ?)`,
-        )
-        .run(name, mail, hash, timezone(ctx.body.timezone), clock().toISOString());
+      info = await db.run(
+        `INSERT INTO users (role, name, email, password_hash, avatar, color, timezone, created_at)
+         VALUES ('parent', ?, ?, ?, '🧑', 'violet', ?, ?)`,
+        [name, mail, hash, timezone(ctx.body.timezone), clock().toISOString()],
+      );
     } catch (err) {
       // Two sign-ups for the same email can both pass the check above while hashing; the UNIQUE index catches the loser.
-      if (/UNIQUE/i.test(String(err?.message))) throw new HttpError(409, 'email_taken', 'An account with that email already exists. Try logging in.');
+      if (/UNIQUE/i.test(String(err?.message))) throw taken;
       throw err;
     }
-    const user = bank.getUser(Number(info.lastInsertRowid));
+    const user = await bank.getUser(info.lastInsertRowid);
     await startSession(ctx, user);
     return { user: userDto(user), unread: 0 };
   });
@@ -77,81 +145,69 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     if (typeof ctx.body.password !== 'string' || !ctx.body.password) {
       throw new HttpError(400, 'invalid', role === 'parent' ? 'Enter your password.' : 'Enter your PIN.');
     }
-    const key = `login:${ctx.ip}:${role}:${identifier}`;
-    const ipKey = `login-ip:${ctx.ip}`;
-    const acctKey = `login-acct:${role}:${identifier}`;
-    // Reserve a slot on all three limiters synchronously, before the slow hash, so parallel guesses can't race past the limit.
-    limiters.login.reserve(key);
-    limiters.loginAccount.reserve(acctKey);
-    limiters.loginIp.reserve(ipKey);
+    const key = `${ctx.ip}:${role}:${identifier}`;
+    const ipKey = ctx.ip;
+    const acctKey = `${role}:${identifier}`;
+    // Count the attempt on all three limiters up front, before the slow hash, so parallel guesses can't race past the limit.
+    await reserveAll([
+      [limiters.login, key],
+      [limiters.loginAccount, acctKey],
+      [limiters.loginIp, ipKey],
+    ]);
 
-    const user =
-      role === 'parent'
-        ? db.prepare("SELECT * FROM users WHERE role = 'parent' AND email = ?").get(identifier)
-        : db.prepare("SELECT * FROM users WHERE role = 'kid' AND username = ?").get(identifier);
+    const user = await db.get(
+      role === 'parent' ? "SELECT * FROM users WHERE role = 'parent' AND email = ?" : "SELECT * FROM users WHERE role = 'kid' AND username = ?",
+      [identifier],
+    );
     let ok = false;
     if (user) ok = await verifyPassword(ctx.body.password, user.password_hash);
     else await burnPasswordCheck(ctx.body.password);
     if (!ok) {
       throw new HttpError(401, 'bad_credentials', role === 'parent' ? 'Incorrect email or password.' : 'Incorrect username or PIN.');
     }
-    limiters.login.reset(key);
-    limiters.loginAccount.reset(acctKey);
-    limiters.loginIp.release(ipKey);
+    await Promise.all([limiters.login.reset(key), limiters.loginAccount.reset(acctKey), limiters.loginIp.release(ipKey)]);
     await startSession(ctx, user);
-    return { user: userDto(user), unread: bank.unreadCount(user.id) };
+    return { user: userDto(user), unread: await bank.unreadCount(user.id) };
   });
 
-  post('/api/auth/logout', 'user', (ctx) => {
-    destroySession(db, ctx.token);
+  post('/api/auth/logout', 'user', async (ctx) => {
+    await destroySession(db, ctx.token);
     ctx.clearSession();
     return { ok: true };
   });
 
   // Public: lets a signed-out visitor's first page load succeed quietly instead of logging a 401.
-  get('/api/session', null, (ctx) =>
-    ctx.user
-      ? {
-          user: userDto(ctx.user),
-          unread: bank.unreadCount(ctx.user.id),
-          pending: ctx.user.role === 'parent' ? bank.pendingRequestCount(ctx.user.id) : 0,
-        }
-      : { user: null },
-  );
+  get('/api/session', null, async (ctx) => (ctx.user ? { user: userDto(ctx.user), ...(await counts(ctx.user)) } : { user: null }));
 
-  get('/api/me', 'user', (ctx) => ({
-    user: userDto(ctx.user),
-    unread: bank.unreadCount(ctx.user.id),
-    pending: ctx.user.role === 'parent' ? bank.pendingRequestCount(ctx.user.id) : 0,
-  }));
+  get('/api/me', 'user', async (ctx) => ({ user: userDto(ctx.user), ...(await counts(ctx.user)) }));
 
-  patch('/api/me', 'parent', (ctx) => {
+  patch('/api/me', 'parent', async (ctx) => {
     const name = text(ctx.body.name, { field: 'Name', max: 60 });
     const tz = timezone(ctx.body.timezone);
-    db.prepare('UPDATE users SET name = ?, timezone = ? WHERE id = ?').run(name, tz, ctx.user.id);
-    return { user: userDto(bank.getUser(ctx.user.id)) };
+    await db.run('UPDATE users SET name = ?, timezone = ? WHERE id = ?', [name, tz, ctx.user.id]);
+    return { user: userDto(await bank.getUser(ctx.user.id)) };
   });
 
   post('/api/auth/password', 'user', async (ctx) => {
     await confirmPassword(ctx, ctx.body.current);
     const next = password(ctx.body.next, { min: ctx.user.role === 'parent' ? 8 : KID_PIN_MIN, field: ctx.user.role === 'parent' ? 'New password' : 'New PIN' });
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(next), ctx.user.id);
-    destroyUserSessions(db, ctx.user.id, ctx.token);
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(next), ctx.user.id]);
+    await destroyUserSessions(db, ctx.user.id, ctx.token);
     return { ok: true };
   });
 
   // ───────────── notifications ─────────────
   get('/api/notifications', 'user', (ctx) => bank.listNotifications(ctx.user.id));
-  post('/api/notifications/read', 'user', (ctx) => {
-    bank.markNotificationsRead(ctx.user.id);
+  post('/api/notifications/read', 'user', async (ctx) => {
+    await bank.markNotificationsRead(ctx.user.id);
     return { ok: true };
   });
 
   // ───────────── parent: overview, funds ─────────────
   get('/api/parent/overview', 'parent', (ctx) => bank.parentOverview(ctx.user.id));
 
-  post('/api/parent/funds', 'parent', (ctx) => ({
-    balanceCents: bank.addFunds(ctx.user.id, positive(ctx.body.amountCents)),
+  post('/api/parent/funds', 'parent', async (ctx) => ({
+    balanceCents: await bank.addFunds(ctx.user.id, positive(ctx.body.amountCents)),
   }));
 
   // ───────────── parent: kids ─────────────
@@ -162,14 +218,14 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     const avatar = oneOf(ctx.body.avatar ?? AVATARS[0], AVATARS, { field: 'Avatar' });
     const color = oneOf(ctx.body.color ?? COLORS[0], COLORS, { field: 'Color' });
     const hash = await hashPassword(pin);
-    const kidId = bank.createKid(ctx.user, { name, username: uname, passwordHash: hash, avatar, color });
+    const kidId = await bank.createKid(ctx.user, { name, username: uname, passwordHash: hash, avatar, color });
     return { id: kidId };
   });
 
   get('/api/kids/:id', 'parent', (ctx) => bank.kidDetail(ctx.user.id, id(ctx.params.id)));
 
-  patch('/api/kids/:id', 'parent', (ctx) => {
-    bank.updateKid(ctx.user.id, id(ctx.params.id), {
+  patch('/api/kids/:id', 'parent', async (ctx) => {
+    await bank.updateKid(ctx.user.id, id(ctx.params.id), {
       name: text(ctx.body.name, { field: 'Name', max: 40 }),
       avatar: oneOf(ctx.body.avatar, AVATARS, { field: 'Avatar' }),
       color: oneOf(ctx.body.color, COLORS, { field: 'Color' }),
@@ -179,19 +235,18 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
 
   post('/api/kids/:id/password', 'parent', async (ctx) => {
     const kidId = id(ctx.params.id);
-    bank.ownKid(ctx.user.id, kidId);
+    const kid = await bank.ownKid(ctx.user.id, kidId);
     const pin = password(ctx.body.password, { min: KID_PIN_MIN, field: 'PIN' });
-    const kid = bank.getUser(kidId);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await hashPassword(pin), kidId);
-    destroyUserSessions(db, kidId);
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(pin), kidId]);
+    await destroyUserSessions(db, kidId);
     // A parent resetting the PIN is the recovery path if someone locked the kid out.
-    limiters.loginAccount.reset(`login-acct:kid:${kid.username}`);
+    await limiters.loginAccount.reset(`kid:${kid.username}`);
     return { ok: true };
   });
 
   del('/api/kids/:id', 'parent', async (ctx) => {
     const kidId = id(ctx.params.id);
-    bank.ownKid(ctx.user.id, kidId);
+    await bank.ownKid(ctx.user.id, kidId);
     await confirmPassword(ctx, ctx.body.password);
     return bank.removeKid(ctx.user.id, kidId);
   });
@@ -211,7 +266,7 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
   );
 
   // ───────────── parent: requests + activity ─────────────
-  get('/api/requests', 'parent', (ctx) => ({ items: bank.requestsForParent(ctx.user.id, { limit: 60 }) }));
+  get('/api/requests', 'parent', async (ctx) => ({ items: await bank.requestsForParent(ctx.user.id, { limit: 60 }) }));
 
   post('/api/requests/:id/approve', 'parent', (ctx) =>
     bank.decideRequest(ctx.user.id, id(ctx.params.id), true, note(ctx.body.note)),
@@ -225,10 +280,10 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     limit: Math.min(Math.max(Number(ctx.query.get('limit')) || 30, 1), 100),
   });
 
-  get('/api/activity', 'parent', (ctx) => {
+  get('/api/activity', 'parent', async (ctx) => {
     const kidParam = ctx.query.get('kid');
     const kidId = kidParam ? id(kidParam) : null;
-    if (kidId) bank.ownKid(ctx.user.id, kidId);
+    if (kidId) await bank.ownKid(ctx.user.id, kidId);
     return bank.familyActivity(ctx.user.id, { kidId, ...pageParams(ctx) });
   });
 
@@ -245,33 +300,33 @@ export function registerRoutes(router, { db, bank, limiters, clock }) {
     ),
   );
 
-  post('/api/kid/requests', 'kid', (ctx) => ({
-    id: bank.createRequest(ctx.user.id, positive(ctx.body.amountCents), text(ctx.body.reason, { field: 'Reason', max: 140 })),
+  post('/api/kid/requests', 'kid', async (ctx) => ({
+    id: await bank.createRequest(ctx.user.id, positive(ctx.body.amountCents), text(ctx.body.reason, { field: 'Reason', max: 140 })),
   }));
-  del('/api/kid/requests/:id', 'kid', (ctx) => {
-    bank.cancelRequest(ctx.user.id, id(ctx.params.id));
+  del('/api/kid/requests/:id', 'kid', async (ctx) => {
+    await bank.cancelRequest(ctx.user.id, id(ctx.params.id));
     return { ok: true };
   });
 
   const GOAL_EMOJI = ['🎯', '🚲', '🎮', '🧸', '📱', '🎧', '👟', '🎸', '⚽', '🎨', '🚀', '📚', '🎁', '🏕️', '🛹', '🐶'];
-  post('/api/kid/goals', 'kid', (ctx) => ({
-    id: bank.createGoal(ctx.user.id, {
+  post('/api/kid/goals', 'kid', async (ctx) => ({
+    id: await bank.createGoal(ctx.user.id, {
       name: text(ctx.body.name, { field: 'Goal name', max: 40 }),
       emoji: oneOf(ctx.body.emoji ?? GOAL_EMOJI[0], GOAL_EMOJI, { field: 'Emoji' }),
       targetCents: cents(ctx.body.targetCents, { field: 'Goal amount', min: 100 }),
     }),
   }));
   post('/api/kid/goals/:id/save', 'kid', (ctx) => bank.saveToGoal(ctx.user.id, id(ctx.params.id), positive(ctx.body.amountCents)));
-  post('/api/kid/goals/:id/withdraw', 'kid', (ctx) => {
-    bank.withdrawFromGoal(ctx.user.id, id(ctx.params.id), positive(ctx.body.amountCents));
+  post('/api/kid/goals/:id/withdraw', 'kid', async (ctx) => {
+    await bank.withdrawFromGoal(ctx.user.id, id(ctx.params.id), positive(ctx.body.amountCents));
     return { ok: true };
   });
-  post('/api/kid/goals/:id/purchase', 'kid', (ctx) => {
-    bank.purchaseGoal(ctx.user.id, id(ctx.params.id));
+  post('/api/kid/goals/:id/purchase', 'kid', async (ctx) => {
+    await bank.purchaseGoal(ctx.user.id, id(ctx.params.id));
     return { ok: true };
   });
-  del('/api/kid/goals/:id', 'kid', (ctx) => {
-    bank.cancelGoal(ctx.user.id, id(ctx.params.id));
+  del('/api/kid/goals/:id', 'kid', async (ctx) => {
+    await bank.cancelGoal(ctx.user.id, id(ctx.params.id));
     return { ok: true };
   });
 }

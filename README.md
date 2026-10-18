@@ -11,12 +11,13 @@ ask for more.
 
 ## Run it
 
-Requires **Node 22.13+**. There are no npm dependencies to install.
+Requires **Node 20.10+**.
 
 ```bash
+npm install
 npm run demo     # seeds a demo family with 5 weeks of history, then starts the app
 # or
-npm start        # starts with an empty database (data/nestly.db)
+npm start        # starts with an empty local database (data/nestly.db)
 ```
 
 Open <http://localhost:3000>.
@@ -62,14 +63,18 @@ server/
   seed.js           builds the demo family by replaying real operations on a moving clock
   lib/bank.js       the banking engine — every money movement is one SQLite transaction
   lib/auth.js       scrypt password hashing, sessions, login throttling
-  lib/db.js         schema (Node's built-in node:sqlite)
+  config.js         picks the database from the environment
+  lib/db.js         schema + one async interface over libSQL (local file or hosted Turso)
+api/index.js        Vercel serverless entry (same app, no server process)
+vercel.json         Vercel config: /api rewrite, security headers, daily allowance cron
+render.yaml         Render blueprint (free plan + Turso)
 public/             the single-page app: vanilla ES modules + one stylesheet, no build step
 test/api.test.js    API tests (npm test)
 ```
 
 **Money safety**
 - Amounts are integer cents end to end; the API rejects anything else.
-- Transfers write both sides of the ledger inside one `BEGIN IMMEDIATE` transaction, and balances
+- Transfers write both sides of the ledger inside one write transaction, and balances
   can't go negative (a database `CHECK` plus explicit checks with friendly errors).
 - The tests include a race: 12 simultaneous sends against a $100 balance produce exactly 5 successes.
 
@@ -86,7 +91,8 @@ test/api.test.js    API tests (npm test)
   (no inline script or style), and all user text is rendered with text nodes, never as HTML.
 
 **Time:** allowances are scheduled as calendar dates in the parent's time zone and paid by a background
-job that runs every 30 seconds. After downtime it pays one allowance, not a backlog.
+job (every 30 seconds on a normal server; see *Deploy* for serverless hosts). After downtime it pays one
+allowance, not a backlog.
 
 ## Configuration
 
@@ -94,31 +100,68 @@ job that runs every 30 seconds. After downtime it pays one allowance, not a back
 | --- | --- | --- |
 | `PORT` | `3000` | Port to listen on |
 | `HOST` | `0.0.0.0` | Interface to bind |
-| `DB_PATH` | `data/nestly.db` | SQLite file |
+| `DB_PATH` | `data/nestly.db` | Local SQLite file (ignored when `TURSO_DATABASE_URL` is set) |
+| `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` | _unset_ | Use a hosted Turso database instead of a local file |
+| `CRON_SECRET` | _unset_ | Enables `/api/cron/allowances` (called daily by Vercel Cron) |
 | `TRUST_PROXY` | `0` | Number of trusted proxies in front of the app (see *Deploy*). Makes cookies `Secure` behind TLS and reads client IPs from `X-Forwarded-For` |
 
-## Deploy to Render
+## Deploy for free (Vercel or Render + Turso)
 
-Nestly is one always-on Node server with a SQLite file, so it needs a host with a **persistent disk**
-(Render, Railway, Fly.io…). It will not work on serverless platforms such as Vercel: the filesystem there is
-ephemeral and the allowance scheduler needs a process that stays up.
+Free hosts don't keep files between runs, so Nestly stores its data in a **Turso** database (hosted SQLite,
+free tier). The same code runs against a local file on your laptop and against Turso in the cloud — only the
+environment variables differ.
 
-1. Push this repo to GitHub (the Blueprint deploys the `main` branch).
-2. In Render: **New → Blueprint**, pick this repository, and approve the plan. `render.yaml` creates the
-   web service, sets `TRUST_PROXY=1`, `DB_PATH=/var/data/nestly.db`, `NODE_VERSION`, a health check on
-   `/api/health`, and a 1 GB disk mounted at `/var/data`.
-3. Open the `onrender.com` URL and choose **Create an account**.
+### 1. Create the free database (2 minutes)
+1. Sign up at <https://turso.tech> and create a database. Pick a region close to your host
+   (for Vercel, a US East region such as AWS `us-east-1` / Virginia; the function runs in `iad1`).
+2. Copy its **URL** (`libsql://…turso.io`) and create an **auth token**.
+   (On Vercel you can instead add Turso from the **Marketplace** tab, which sets both variables for you.)
 
-Notes:
-- The disk needs a paid instance (the Blueprint uses `starter`). Without a disk, data is lost on every restart.
+### 2a. Vercel
+1. Import this repo in Vercel (no build settings to change — `vercel.json` handles it).
+2. Add these **Environment Variables** (Production + Preview), then redeploy:
+
+| Variable | Value |
+| --- | --- |
+| `TURSO_DATABASE_URL` | the `libsql://…` URL |
+| `TURSO_AUTH_TOKEN` | the Turso token |
+| `CRON_SECRET` | any long random string (Vercel sends it to the daily allowance job automatically) |
+
+Until the database variables are set, the site shows a "Nestly isn't set up yet" message instead of crashing.
+Preview deployments (branches) use the **Preview** environment's variables, so add them there too if you want to test a branch.
+`TRUST_PROXY` isn't needed: the Vercel entry already trusts exactly one proxy.
+
+### 2b. Render (free plan)
+1. **New → Blueprint**, pick this repo; `render.yaml` creates a free web service.
+2. When asked, paste `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+3. Free services sleep after ~15 minutes idle and wake in a few seconds on the next visit.
+   If the database variables are missing the service refuses to start (and says why in its logs) rather than quietly
+   storing data on a disk that is wiped on every restart.
+
+### If something doesn't work
+Open `https://<your-site>/api/diagnose`. It runs the same steps a sign-in does against your real database
+(setup, read, write, password hashing) and shows which one fails, with secrets redacted. Server errors also show a
+short code in brackets, e.g. `(SERVER_ERROR)`. Remote database URLs are always used over HTTPS (`libsql://` is
+rewritten to `https://`), which is what serverless hosts need.
+
+### How allowances work without an always-on server
+There's no background process on these hosts, so allowances are paid (a) by a daily cron on Vercel,
+(b) whenever someone opens the app (checked at most once a minute), and (c) on every wake-up on Render.
+A due allowance can therefore arrive when the family next opens the app rather than at an exact minute.
+It's safe to run from many places at once: each payment re-checks inside its own transaction that it is
+still due, so it can never pay twice.
+
+### Notes
 - Don't run `npm run demo` in production — it publishes known demo logins.
-- Back up `/var/data/nestly.db` (Render disk snapshots, or `sqlite3 nestly.db ".backup out.db"`).
-- `TRUST_PROXY` is the **number of proxies in front of the app** (`1` = trust one). The client IP is read that many
+- Back up your data with the Turso dashboard/CLI (`turso db shell <name> .dump`).
+- `TRUST_PROXY` (non-Vercel hosts) is the **number of proxies in front of the app**. The client IP is read that many
   entries from the *right* of `X-Forwarded-For`, because everything further left is client-supplied. The first
   request after each start logs the header it saw (`[proxy] first request: …`). If every visitor ends up sharing
-  one IP — e.g. you see "Too many attempts" for different people at once — Render has more than one proxy hop in
-  front of you, so raise it to `2`. Never set it higher than the real number of hops. Per-account login lockout
+  one IP — e.g. you see "Too many attempts" for different people at once — there is more than one proxy hop in
+  front of you, so raise it. Never set it higher than the real number of hops. Per-account login lockout
   doesn't depend on the client IP at all.
+- Prefer a server with a disk (Railway, Fly.io, a VPS)? Skip Turso: leave `TURSO_*` unset, mount a volume, and set
+  `DB_PATH` to a file on it.
 
 ## Tests
 

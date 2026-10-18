@@ -1,6 +1,5 @@
-// The banking engine. Every function here is synchronous and any operation that
-// moves money runs inside a single SQLite transaction, so a failure part-way
-// through can never leave the books out of balance.
+// The banking engine. Any operation that moves money runs inside a single database
+// transaction, so a failure part-way through can never leave the books out of balance.
 //
 // Ledger conventions (transactions table):
 //   amount_cents  signed effect on the owner's money, in cents
@@ -27,57 +26,35 @@ const CATEGORY_EMOJI = { food: '🍕', games: '🎮', toys: '🧸', books: '📚
 const notFound = (what = 'That') => new HttpError(404, 'not_found', `${what} wasn't found.`);
 
 export function createBank(db, clock = () => new Date()) {
-  const stmts = new Map();
-  const q = (sql) => {
-    let s = stmts.get(sql);
-    if (!s) stmts.set(sql, (s = db.prepare(sql)));
-    return s;
-  };
+  const q = (sql) => ({
+    get: (...args) => db.get(sql, args),
+    all: (...args) => db.all(sql, args),
+    run: (...args) => db.run(sql, args),
+  });
   const nowIso = () => clock().toISOString();
-
-  let depth = 0;
-  /** Runs fn inside a transaction. Nested calls join the outer one. */
-  function atomic(fn) {
-    if (depth > 0) return fn();
-    db.exec('BEGIN IMMEDIATE');
-    depth++;
-    try {
-      const result = fn();
-      db.exec('COMMIT');
-      return result;
-    } catch (err) {
-      try {
-        db.exec('ROLLBACK');
-      } catch {
-        /* already rolled back */
-      }
-      throw err;
-    } finally {
-      depth--;
-    }
-  }
+  const atomic = (fn) => db.atomic(fn);
 
   // ───────────────────────── low-level ledger ─────────────────────────
 
-  function post(userId, { kind, amount, delta = amount, counterparty = null, note = null, category = null, goalId = null }) {
-    const u = q('SELECT balance_cents FROM users WHERE id = ?').get(userId);
+  async function post(userId, { kind, amount, delta = amount, counterparty = null, note = null, category = null, goalId = null }) {
+    const u = await q('SELECT balance_cents FROM users WHERE id = ?').get(userId);
     if (!u) throw notFound('Account');
     if (u.balance_cents + delta < 0) throw new HttpError(400, 'insufficient_funds', 'Not enough money for that.');
-    if (delta !== 0) q('UPDATE users SET balance_cents = balance_cents + ? WHERE id = ?').run(delta, userId);
-    const info = q(
+    if (delta !== 0) await q('UPDATE users SET balance_cents = balance_cents + ? WHERE id = ?').run(delta, userId);
+    const info = await q(
       `INSERT INTO transactions (user_id, kind, amount_cents, counterparty_id, counterparty_name, note, category, goal_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(userId, kind, amount, counterparty?.id ?? null, counterparty?.name ?? null, note, category, goalId, nowIso());
     return Number(info.lastInsertRowid);
   }
 
-  function transfer(from, to, amount, { fromKind, toKind, note = null }) {
-    post(from.id, { kind: fromKind, amount: -amount, counterparty: to, note });
-    post(to.id, { kind: toKind, amount, counterparty: from, note });
+  async function transfer(from, to, amount, { fromKind, toKind, note = null }) {
+    await post(from.id, { kind: fromKind, amount: -amount, counterparty: to, note });
+    await post(to.id, { kind: toKind, amount, counterparty: from, note });
   }
 
-  function notify(userId, { icon = '🔔', title, body = null, link = null }) {
-    q('INSERT INTO notifications (user_id, icon, title, body, link, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+  async function notify(userId, { icon = '🔔', title, body = null, link = null }) {
+    await q('INSERT INTO notifications (user_id, icon, title, body, link, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       userId,
       icon,
       title,
@@ -89,16 +66,16 @@ export function createBank(db, clock = () => new Date()) {
 
   const getUser = (id) => q('SELECT * FROM users WHERE id = ?').get(id);
 
-  function ownKid(parentId, kidId) {
-    const kid = q("SELECT * FROM users WHERE id = ? AND role = 'kid' AND parent_id = ?").get(kidId, parentId);
+  async function ownKid(parentId, kidId) {
+    const kid = await q("SELECT * FROM users WHERE id = ? AND role = 'kid' AND parent_id = ?").get(kidId, parentId);
     if (!kid) throw notFound('That kid');
     return kid;
   }
 
   // ───────────────────────── controls ─────────────────────────
 
-  function controlsRow(kidId) {
-    return q('SELECT * FROM kid_controls WHERE kid_id = ?').get(kidId);
+  async function controlsRow(kidId) {
+    return await q('SELECT * FROM kid_controls WHERE kid_id = ?').get(kidId);
   }
 
   function controlsDto(row) {
@@ -116,14 +93,14 @@ export function createBank(db, clock = () => new Date()) {
     };
   }
 
-  function parentZone(kid) {
-    return q('SELECT timezone FROM users WHERE id = ?').get(kid.parent_id)?.timezone ?? 'UTC';
+  async function parentZone(kid) {
+    return (await q('SELECT timezone FROM users WHERE id = ?').get(kid.parent_id))?.timezone ?? 'UTC';
   }
 
-  function updateControls(parentId, kidId, input) {
-    return atomic(() => {
-      const kid = ownKid(parentId, kidId);
-      const cur = controlsRow(kidId);
+  async function updateControls(parentId, kidId, input) {
+    return atomic(async () => {
+      const kid = await ownKid(parentId, kidId);
+      const cur = await controlsRow(kidId);
       const next = { ...cur };
       const notes = [];
 
@@ -167,7 +144,7 @@ export function createBank(db, clock = () => new Date()) {
         if (!a.active) {
           next.allowance_next = null;
         } else if (!cur.allowance_active || scheduleChanged || !cur.allowance_next) {
-          next.allowance_next = firstDue(dateInZone(clock(), parentZone(kid)), freq, day);
+          next.allowance_next = firstDue(dateInZone(clock(), await parentZone(kid)), freq, day);
         }
         next.allowance_fail_notified = null;
         if (a.active && (!cur.allowance_active || amount !== cur.allowance_cents || scheduleChanged)) {
@@ -179,7 +156,7 @@ export function createBank(db, clock = () => new Date()) {
         }
       }
 
-      q(
+      await q(
         `UPDATE kid_controls SET frozen = ?, weekly_limit_cents = ?, max_request_cents = ?, allowance_cents = ?,
            allowance_freq = ?, allowance_day = ?, allowance_active = ?, allowance_next = ?, allowance_fail_notified = ?
          WHERE kid_id = ?`,
@@ -195,17 +172,17 @@ export function createBank(db, clock = () => new Date()) {
         next.allowance_fail_notified,
         kidId,
       );
-      for (const n of notes) notify(kidId, { ...n, link: '#/' });
-      return controlsDto(controlsRow(kidId));
+      for (const n of notes) await notify(kidId, { ...n, link: '#/' });
+      return controlsDto(await controlsRow(kidId));
     });
   }
 
   // ───────────────────────── spending window ─────────────────────────
 
   /** Spending in the last 7 days and when the oldest purchase rolls out of the window. */
-  function spendWindow(kidId) {
+  async function spendWindow(kidId) {
     const since = new Date(clock().getTime() - 7 * DAY_MS).toISOString();
-    const row = q(
+    const row = await q(
       `SELECT COALESCE(-SUM(amount_cents), 0) AS spent, MIN(created_at) AS oldest
        FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?`,
     ).get(kidId, since);
@@ -217,102 +194,108 @@ export function createBank(db, clock = () => new Date()) {
 
   // ───────────────────────── parent actions ─────────────────────────
 
-  function addFunds(parentId, amount) {
+  async function addFunds(parentId, amount) {
     cents(amount, { field: 'Amount', max: MAX_DEPOSIT_CENTS });
-    return atomic(() => {
-      post(parentId, { kind: 'deposit', amount, note: 'Practice funds' });
-      return getUser(parentId).balance_cents;
+    return atomic(async () => {
+      await post(parentId, { kind: 'deposit', amount, note: 'Practice funds' });
+      return (await getUser(parentId)).balance_cents;
     });
   }
 
-  function sendMoney(parentId, kidId, amount, note) {
-    return atomic(() => {
-      const kid = ownKid(parentId, kidId);
-      const parent = getUser(parentId);
+  async function sendMoney(parentId, kidId, amount, note) {
+    return atomic(async () => {
+      const kid = await ownKid(parentId, kidId);
+      const parent = await getUser(parentId);
       if (parent.balance_cents < amount) {
         throw new HttpError(400, 'insufficient_funds', `You have ${money(parent.balance_cents)} available. Add funds to send ${money(amount)}.`);
       }
-      transfer(parent, kid, amount, { fromKind: 'send', toKind: 'receive', note });
-      notify(kid.id, {
+      await transfer(parent, kid, amount, { fromKind: 'send', toKind: 'receive', note });
+      await notify(kid.id, {
         icon: '💸',
         title: `${parent.name} sent you ${money(amount)}`,
         body: note,
         link: '#/',
       });
-      return { balanceCents: getUser(parentId).balance_cents, kidBalanceCents: getUser(kidId).balance_cents };
+      return { balanceCents: (await getUser(parentId)).balance_cents, kidBalanceCents: (await getUser(kidId)).balance_cents };
     });
   }
 
-  function takeBack(parentId, kidId, amount, note) {
-    return atomic(() => {
-      const kid = ownKid(parentId, kidId);
-      const parent = getUser(parentId);
+  async function takeBack(parentId, kidId, amount, note) {
+    return atomic(async () => {
+      const kid = await ownKid(parentId, kidId);
+      const parent = await getUser(parentId);
       if (kid.balance_cents < amount) {
         throw new HttpError(400, 'insufficient_funds', `${kid.name} only has ${money(kid.balance_cents)} available to take back.`);
       }
-      transfer(kid, parent, amount, { fromKind: 'takeback_out', toKind: 'takeback_in', note });
-      notify(kid.id, {
+      await transfer(kid, parent, amount, { fromKind: 'takeback_out', toKind: 'takeback_in', note });
+      await notify(kid.id, {
         icon: '↩️',
         title: `${parent.name} took back ${money(amount)}`,
         body: note,
         link: '#/activity',
       });
-      return { balanceCents: getUser(parentId).balance_cents, kidBalanceCents: getUser(kidId).balance_cents };
+      return { balanceCents: (await getUser(parentId)).balance_cents, kidBalanceCents: (await getUser(kidId)).balance_cents };
     });
   }
 
-  function createKid(parent, { name, username, passwordHash, avatar, color }) {
-    return atomic(() => {
-      const count = q("SELECT COUNT(*) AS n FROM users WHERE parent_id = ? AND role = 'kid'").get(parent.id).n;
+  async function createKid(parent, { name, username, passwordHash, avatar, color }) {
+    return atomic(async () => {
+      const count = (await q("SELECT COUNT(*) AS n FROM users WHERE parent_id = ? AND role = 'kid'").get(parent.id)).n;
       if (count >= MAX_KIDS) throw new HttpError(400, 'limit', `You can have up to ${MAX_KIDS} kids on one account.`);
-      if (q('SELECT 1 FROM users WHERE username = ?').get(username)) {
+      if (await q('SELECT 1 FROM users WHERE username = ?').get(username)) {
         throw new HttpError(409, 'username_taken', 'That username is taken. Try another.');
       }
-      const info = q(
+      const info = await q(
         `INSERT INTO users (role, name, username, password_hash, parent_id, avatar, color, timezone, created_at)
          VALUES ('kid', ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(name, username, passwordHash, parent.id, avatar, color, parent.timezone, nowIso());
       const kidId = Number(info.lastInsertRowid);
-      q('INSERT INTO kid_controls (kid_id) VALUES (?)').run(kidId);
-      notify(kidId, { icon: '👋', title: `Welcome to Nestly, ${name}!`, body: `${parent.name} set up your account.`, link: '#/' });
+      await q('INSERT INTO kid_controls (kid_id) VALUES (?)').run(kidId);
+      await notify(kidId, { icon: '👋', title: `Welcome to Nestly, ${name}!`, body: `${parent.name} set up your account.`, link: '#/' });
       return kidId;
     });
   }
 
-  function updateKid(parentId, kidId, { name, avatar, color }) {
-    ownKid(parentId, kidId);
-    q('UPDATE users SET name = ?, avatar = ?, color = ? WHERE id = ?').run(name, avatar, color, kidId);
+  async function updateKid(parentId, kidId, { name, avatar, color }) {
+    await ownKid(parentId, kidId);
+    await q('UPDATE users SET name = ?, avatar = ?, color = ? WHERE id = ?').run(name, avatar, color, kidId);
   }
 
   /** Closes a kid's account; anything they still hold goes back to the parent. */
-  function removeKid(parentId, kidId) {
-    return atomic(() => {
-      const kid = ownKid(parentId, kidId);
-      const saved = q("SELECT COALESCE(SUM(saved_cents), 0) AS s FROM goals WHERE kid_id = ? AND status = 'active'").get(kidId).s;
+  async function removeKid(parentId, kidId) {
+    return atomic(async () => {
+      const kid = await ownKid(parentId, kidId);
+      const saved = (await q("SELECT COALESCE(SUM(saved_cents), 0) AS s FROM goals WHERE kid_id = ? AND status = 'active'").get(kidId)).s;
       const returned = kid.balance_cents + saved;
       if (returned > 0) {
-        post(parentId, { kind: 'closed_in', amount: returned, counterparty: kid, note: `Closed ${kid.name}'s account` });
+        await post(parentId, { kind: 'closed_in', amount: returned, counterparty: kid, note: `Closed ${kid.name}'s account` });
       }
-      q('DELETE FROM users WHERE id = ?').run(kidId);
+      // Explicit deletes (children first) so correctness never depends on the database enforcing ON DELETE rules.
+      await q('UPDATE transactions SET counterparty_id = NULL WHERE counterparty_id = ?').run(kidId);
+      for (const table of ['transactions', 'goals', 'money_requests', 'notifications', 'sessions']) {
+        await q(`DELETE FROM ${table} WHERE ${table === 'goals' || table === 'money_requests' ? 'kid_id' : 'user_id'} = ?`).run(kidId);
+      }
+      await q('DELETE FROM kid_controls WHERE kid_id = ?').run(kidId);
+      await q('DELETE FROM users WHERE id = ?').run(kidId);
       return { returnedCents: returned };
     });
   }
 
   // ───────────────────────── requests ─────────────────────────
 
-  function createRequest(kidId, amount, reason) {
-    return atomic(() => {
-      const kid = getUser(kidId);
-      const controls = controlsRow(kidId);
+  async function createRequest(kidId, amount, reason) {
+    return atomic(async () => {
+      const kid = await getUser(kidId);
+      const controls = await controlsRow(kidId);
       if (controls.max_request_cents != null && amount > controls.max_request_cents) {
         throw new HttpError(400, 'over_cap', `Your parent lets you ask for up to ${money(controls.max_request_cents)} at a time.`);
       }
-      const pending = q("SELECT COUNT(*) AS n FROM money_requests WHERE kid_id = ? AND status = 'pending'").get(kidId).n;
+      const pending = (await q("SELECT COUNT(*) AS n FROM money_requests WHERE kid_id = ? AND status = 'pending'").get(kidId)).n;
       if (pending >= MAX_PENDING_REQUESTS) {
         throw new HttpError(400, 'too_many_requests', 'You already have a few requests waiting. Hang tight!');
       }
-      const info = q('INSERT INTO money_requests (kid_id, amount_cents, reason, created_at) VALUES (?, ?, ?, ?)').run(kidId, amount, reason, nowIso());
-      notify(kid.parent_id, {
+      const info = await q('INSERT INTO money_requests (kid_id, amount_cents, reason, created_at) VALUES (?, ?, ?, ?)').run(kidId, amount, reason, nowIso());
+      await notify(kid.parent_id, {
         icon: '🙋',
         title: `${kid.name} asked for ${money(amount)}`,
         body: reason,
@@ -322,8 +305,8 @@ export function createBank(db, clock = () => new Date()) {
     });
   }
 
-  function cancelRequest(kidId, requestId) {
-    const info = q("UPDATE money_requests SET status = 'cancelled', decided_at = ? WHERE id = ? AND kid_id = ? AND status = 'pending'").run(
+  async function cancelRequest(kidId, requestId) {
+    const info = await q("UPDATE money_requests SET status = 'cancelled', decided_at = ? WHERE id = ? AND kid_id = ? AND status = 'pending'").run(
       nowIso(),
       requestId,
       kidId,
@@ -331,85 +314,88 @@ export function createBank(db, clock = () => new Date()) {
     if (!info.changes) throw notFound('That request');
   }
 
-  function decideRequest(parentId, requestId, approve, responseNote) {
-    return atomic(() => {
-      const req = q(
+  async function decideRequest(parentId, requestId, approve, responseNote) {
+    return atomic(async () => {
+      const req = await q(
         `SELECT r.*, k.name AS kid_name FROM money_requests r JOIN users k ON k.id = r.kid_id
          WHERE r.id = ? AND k.parent_id = ?`,
       ).get(requestId, parentId);
       if (!req) throw notFound('That request');
       if (req.status !== 'pending') throw new HttpError(409, 'already_decided', 'That request was already answered.');
-      const parent = getUser(parentId);
+      const parent = await getUser(parentId);
       if (approve) {
         if (parent.balance_cents < req.amount_cents) {
           throw new HttpError(400, 'insufficient_funds', `You have ${money(parent.balance_cents)} available. Add funds to approve ${money(req.amount_cents)}.`);
         }
-        transfer(parent, getUser(req.kid_id), req.amount_cents, {
+        await transfer(parent, await getUser(req.kid_id), req.amount_cents, {
           fromKind: 'send',
           toKind: 'receive',
           note: `Request: ${req.reason}`,
         });
       }
-      q('UPDATE money_requests SET status = ?, response_note = ?, decided_at = ? WHERE id = ?').run(
+      await q('UPDATE money_requests SET status = ?, response_note = ?, decided_at = ? WHERE id = ?').run(
         approve ? 'approved' : 'declined',
         responseNote,
         nowIso(),
         requestId,
       );
-      notify(req.kid_id, {
+      await notify(req.kid_id, {
         icon: approve ? '✅' : '🙅',
         title: approve ? `${parent.name} said yes to ${money(req.amount_cents)}!` : `${parent.name} said not this time`,
         body: responseNote || req.reason,
         link: '#/ask',
       });
-      return { balanceCents: getUser(parentId).balance_cents };
+      return { balanceCents: (await getUser(parentId)).balance_cents };
     });
   }
 
   // ───────────────────────── allowance engine ─────────────────────────
 
-  /** Pays every allowance that is due. Safe to call as often as you like. */
-  function runAllowances() {
+  /** Pays every allowance that is due. Safe to call as often as you like, from any number of processes. */
+  async function runAllowances() {
     const now = clock();
     // A calendar date in any time zone is within a day of the UTC date, so anything later than that can't be due yet.
     const horizon = addDays(dateInZone(now, 'UTC'), 1);
-    const rows = q(
-      `SELECT c.*, k.name AS kid_name, k.parent_id, p.name AS parent_name, p.timezone
+    const rows = await q(
+      `SELECT c.kid_id, k.name AS kid_name, k.parent_id, p.name AS parent_name, p.timezone
        FROM kid_controls c JOIN users k ON k.id = c.kid_id JOIN users p ON p.id = k.parent_id
        WHERE c.allowance_active = 1 AND c.allowance_next IS NOT NULL AND c.allowance_next <= ?`,
     ).all(horizon);
     const paid = [];
     for (const r of rows) {
       const today = dateInZone(now, r.timezone);
-      if (r.allowance_next > today) continue;
       try {
-        atomic(() => {
-          const parent = getUser(r.parent_id);
-          if (parent.balance_cents < r.allowance_cents) {
+        await atomic(async () => {
+          // Re-read inside the transaction: another process may have paid (or the parent may have changed) this
+          // allowance since the list above was fetched, and paying twice must be impossible.
+          const c = await controlsRow(r.kid_id);
+          if (!c || !c.allowance_active || !c.allowance_next || c.allowance_next > today) return;
+          const parent = await getUser(r.parent_id);
+          if (parent.balance_cents < c.allowance_cents) {
             // Retry on the next tick, but only tell the parent once per missed date.
-            if (r.allowance_fail_notified !== r.allowance_next) {
-              notify(r.parent_id, {
+            if (c.allowance_fail_notified !== c.allowance_next) {
+              await notify(r.parent_id, {
                 icon: '⚠️',
                 title: `${r.kid_name}'s allowance is waiting`,
-                body: `You need ${money(r.allowance_cents)} in your balance to pay it. Add funds and it will go out automatically.`,
+                body: `You need ${money(c.allowance_cents)} in your balance to pay it. Add funds and it will go out automatically.`,
                 link: '#/funding',
               });
-              q('UPDATE kid_controls SET allowance_fail_notified = ? WHERE kid_id = ?').run(r.allowance_next, r.kid_id);
+              await q('UPDATE kid_controls SET allowance_fail_notified = ? WHERE kid_id = ?').run(c.allowance_next, r.kid_id);
             }
             return;
           }
-          const kid = getUser(r.kid_id);
-          transfer(parent, kid, r.allowance_cents, {
+          const kid = await getUser(r.kid_id);
+          await transfer(parent, kid, c.allowance_cents, {
             fromKind: 'allowance_out',
             toKind: 'allowance_in',
-            note: r.allowance_freq === 'monthly' ? 'Monthly allowance' : r.allowance_freq === 'biweekly' ? 'Biweekly allowance' : 'Weekly allowance',
+            note: c.allowance_freq === 'monthly' ? 'Monthly allowance' : c.allowance_freq === 'biweekly' ? 'Biweekly allowance' : 'Weekly allowance',
           });
-          // Missed periods (e.g. the server was off) are not paid retroactively.
-          let next = advance(r.allowance_next, r.allowance_freq, r.allowance_day);
-          while (next <= today) next = advance(next, r.allowance_freq, r.allowance_day);
-          q('UPDATE kid_controls SET allowance_next = ?, allowance_fail_notified = NULL WHERE kid_id = ?').run(next, r.kid_id);
-          notify(r.kid_id, { icon: '🎉', title: `Allowance day! ${money(r.allowance_cents)} arrived`, body: `From ${parent.name}`, link: '#/' });
-          paid.push({ kidId: r.kid_id, cents: r.allowance_cents });
+          // Missed periods (e.g. nobody visited for a while) are not paid retroactively.
+          let next = advance(c.allowance_next, c.allowance_freq, c.allowance_day);
+          while (next <= today) next = advance(next, c.allowance_freq, c.allowance_day);
+          await q('UPDATE kid_controls SET allowance_next = ?, allowance_fail_notified = NULL WHERE kid_id = ?').run(next, r.kid_id);
+          await notify(r.kid_id, { icon: '🎉', title: `Allowance day! ${money(c.allowance_cents)} arrived`, body: `From ${parent.name}`, link: '#/' });
+          paid.push({ kidId: r.kid_id, cents: c.allowance_cents });
         });
       } catch (err) {
         console.error('Allowance payment failed for kid', r.kid_id, err);
@@ -420,11 +406,11 @@ export function createBank(db, clock = () => new Date()) {
 
   // ───────────────────────── kid actions ─────────────────────────
 
-  function spend(kidId, amount, category, note) {
+  async function spend(kidId, amount, category, note) {
     oneOf(category, CATEGORIES, { field: 'Category' });
-    return atomic(() => {
-      const kid = getUser(kidId);
-      const controls = controlsRow(kidId);
+    return atomic(async () => {
+      const kid = await getUser(kidId);
+      const controls = await controlsRow(kidId);
       if (controls.frozen) {
         throw new HttpError(403, 'frozen', 'Spending is paused by your parent right now.');
       }
@@ -432,7 +418,7 @@ export function createBank(db, clock = () => new Date()) {
         throw new HttpError(400, 'insufficient_funds', `You only have ${money(kid.balance_cents)} to spend.`);
       }
       if (controls.weekly_limit_cents != null) {
-        const { spentCents } = spendWindow(kidId);
+        const { spentCents } = await spendWindow(kidId);
         const remaining = Math.max(0, controls.weekly_limit_cents - spentCents);
         if (amount > remaining) {
           throw new HttpError(
@@ -445,28 +431,28 @@ export function createBank(db, clock = () => new Date()) {
           );
         }
       }
-      post(kidId, { kind: 'spend', amount: -amount, category, note });
-      notify(kid.parent_id, {
+      await post(kidId, { kind: 'spend', amount: -amount, category, note });
+      await notify(kid.parent_id, {
         icon: CATEGORY_EMOJI[category],
         title: `${kid.name} spent ${money(amount)}`,
         body: note || category[0].toUpperCase() + category.slice(1),
         link: `#/kids/${kidId}`,
       });
-      return { balanceCents: getUser(kidId).balance_cents };
+      return { balanceCents: (await getUser(kidId)).balance_cents };
     });
   }
 
-  function goalRow(kidId, goalId) {
-    const g = q('SELECT * FROM goals WHERE id = ? AND kid_id = ?').get(goalId, kidId);
+  async function goalRow(kidId, goalId) {
+    const g = await q('SELECT * FROM goals WHERE id = ? AND kid_id = ?').get(goalId, kidId);
     if (!g) throw notFound('That goal');
     return g;
   }
 
-  function createGoal(kidId, { name, emoji, targetCents }) {
-    return atomic(() => {
-      const n = q("SELECT COUNT(*) AS n FROM goals WHERE kid_id = ? AND status = 'active'").get(kidId).n;
+  async function createGoal(kidId, { name, emoji, targetCents }) {
+    return atomic(async () => {
+      const n = (await q("SELECT COUNT(*) AS n FROM goals WHERE kid_id = ? AND status = 'active'").get(kidId)).n;
       if (n >= MAX_ACTIVE_GOALS) throw new HttpError(400, 'limit', `You can chase up to ${MAX_ACTIVE_GOALS} goals at once.`);
-      const info = q('INSERT INTO goals (kid_id, name, emoji, target_cents, created_at) VALUES (?, ?, ?, ?, ?)').run(
+      const info = await q('INSERT INTO goals (kid_id, name, emoji, target_cents, created_at) VALUES (?, ?, ?, ?, ?)').run(
         kidId,
         name,
         emoji,
@@ -477,10 +463,10 @@ export function createBank(db, clock = () => new Date()) {
     });
   }
 
-  function saveToGoal(kidId, goalId, amount) {
-    return atomic(() => {
-      const kid = getUser(kidId);
-      const goal = goalRow(kidId, goalId);
+  async function saveToGoal(kidId, goalId, amount) {
+    return atomic(async () => {
+      const kid = await getUser(kidId);
+      const goal = await goalRow(kidId, goalId);
       if (goal.status !== 'active') throw new HttpError(400, 'goal_closed', 'That goal is already finished.');
       const room = goal.target_cents - goal.saved_cents;
       if (amount > room) {
@@ -489,43 +475,43 @@ export function createBank(db, clock = () => new Date()) {
       if (kid.balance_cents < amount) {
         throw new HttpError(400, 'insufficient_funds', `You only have ${money(kid.balance_cents)} to save.`);
       }
-      q('UPDATE goals SET saved_cents = saved_cents + ? WHERE id = ?').run(amount, goalId);
-      post(kidId, { kind: 'goal_save', amount: -amount, counterparty: { id: null, name: goal.name }, goalId });
-      const now = goalRow(kidId, goalId);
+      await q('UPDATE goals SET saved_cents = saved_cents + ? WHERE id = ?').run(amount, goalId);
+      await post(kidId, { kind: 'goal_save', amount: -amount, counterparty: { id: null, name: goal.name }, goalId });
+      const now = await goalRow(kidId, goalId);
       return { reached: now.saved_cents >= now.target_cents };
     });
   }
 
-  function withdrawFromGoal(kidId, goalId, amount) {
-    return atomic(() => {
-      const goal = goalRow(kidId, goalId);
+  async function withdrawFromGoal(kidId, goalId, amount) {
+    return atomic(async () => {
+      const goal = await goalRow(kidId, goalId);
       if (goal.status !== 'active') throw new HttpError(400, 'goal_closed', 'That goal is already finished.');
       if (goal.saved_cents < amount) {
         throw new HttpError(400, 'insufficient_funds', `Only ${money(goal.saved_cents)} is saved in this goal.`);
       }
-      q('UPDATE goals SET saved_cents = saved_cents - ? WHERE id = ?').run(amount, goalId);
-      post(kidId, { kind: 'goal_release', amount, counterparty: { id: null, name: goal.name }, goalId });
+      await q('UPDATE goals SET saved_cents = saved_cents - ? WHERE id = ?').run(amount, goalId);
+      await post(kidId, { kind: 'goal_release', amount, counterparty: { id: null, name: goal.name }, goalId });
     });
   }
 
-  function purchaseGoal(kidId, goalId) {
-    return atomic(() => {
-      const kid = getUser(kidId);
-      const goal = goalRow(kidId, goalId);
+  async function purchaseGoal(kidId, goalId) {
+    return atomic(async () => {
+      const kid = await getUser(kidId);
+      const goal = await goalRow(kidId, goalId);
       if (goal.status !== 'active') throw new HttpError(400, 'goal_closed', 'That goal is already finished.');
-      if (controlsRow(kidId).frozen) throw new HttpError(403, 'frozen', 'Spending is paused by your parent right now.');
+      if ((await controlsRow(kidId)).frozen) throw new HttpError(403, 'frozen', 'Spending is paused by your parent right now.');
       if (goal.saved_cents < goal.target_cents) {
         throw new HttpError(400, 'not_funded', `Save ${money(goal.target_cents - goal.saved_cents)} more first.`);
       }
-      q("UPDATE goals SET status = 'purchased', closed_at = ? WHERE id = ?").run(nowIso(), goalId);
-      post(kidId, {
+      await q("UPDATE goals SET status = 'purchased', closed_at = ? WHERE id = ?").run(nowIso(), goalId);
+      await post(kidId, {
         kind: 'goal_purchase',
         amount: -goal.saved_cents,
         delta: 0,
         counterparty: { id: null, name: goal.name },
         goalId,
       });
-      notify(kid.parent_id, {
+      await notify(kid.parent_id, {
         icon: goal.emoji,
         title: `${kid.name} bought "${goal.name}"`,
         body: `They saved up ${money(goal.saved_cents)} for it. 🎉`,
@@ -534,14 +520,14 @@ export function createBank(db, clock = () => new Date()) {
     });
   }
 
-  function cancelGoal(kidId, goalId) {
-    return atomic(() => {
-      const goal = goalRow(kidId, goalId);
+  async function cancelGoal(kidId, goalId) {
+    return atomic(async () => {
+      const goal = await goalRow(kidId, goalId);
       if (goal.status !== 'active') throw new HttpError(400, 'goal_closed', 'That goal is already finished.');
       if (goal.saved_cents > 0) {
-        post(kidId, { kind: 'goal_release', amount: goal.saved_cents, counterparty: { id: null, name: goal.name }, goalId });
+        await post(kidId, { kind: 'goal_release', amount: goal.saved_cents, counterparty: { id: null, name: goal.name }, goalId });
       }
-      q("UPDATE goals SET status = 'cancelled', saved_cents = 0, closed_at = ? WHERE id = ?").run(nowIso(), goalId);
+      await q("UPDATE goals SET status = 'cancelled', saved_cents = 0, closed_at = ? WHERE id = ?").run(nowIso(), goalId);
     });
   }
 
@@ -558,20 +544,23 @@ export function createBank(db, clock = () => new Date()) {
     closedAt: g.closed_at,
   });
 
-  function goalsFor(kidId) {
-    return q(
+  const countOf = async (sql, ...args) => (await q(sql).get(...args)).n;
+
+  async function goalsFor(kidId) {
+    const rows = await q(
       `SELECT * FROM goals WHERE kid_id = ? AND status != 'cancelled'
        ORDER BY (status = 'active') DESC, COALESCE(closed_at, created_at) DESC, id DESC LIMIT 40`,
-    )
-      .all(kidId)
-      .map(goalDto);
+    ).all(kidId);
+    return rows.map(goalDto);
   }
 
-  function kidSummary(kid) {
-    const controls = controlsDto(controlsRow(kid.id));
-    const { spentCents, freesUpAt } = spendWindow(kid.id);
-    const goals = q("SELECT COALESCE(SUM(saved_cents), 0) AS s, COUNT(*) AS n FROM goals WHERE kid_id = ? AND status = 'active'").get(kid.id);
-    const pending = q("SELECT COUNT(*) AS n FROM money_requests WHERE kid_id = ? AND status = 'pending'").get(kid.id).n;
+  async function kidSummary(kid) {
+    const [controlsRowData, window, goals, pending] = await Promise.all([
+      controlsRow(kid.id),
+      spendWindow(kid.id),
+      q("SELECT COALESCE(SUM(saved_cents), 0) AS s, COUNT(*) AS n FROM goals WHERE kid_id = ? AND status = 'active'").get(kid.id),
+      countOf("SELECT COUNT(*) AS n FROM money_requests WHERE kid_id = ? AND status = 'pending'", kid.id),
+    ]);
     return {
       id: kid.id,
       name: kid.name,
@@ -581,10 +570,10 @@ export function createBank(db, clock = () => new Date()) {
       balanceCents: kid.balance_cents,
       savedCents: goals.s,
       activeGoals: goals.n,
-      spent7dCents: spentCents,
-      freesUpAt,
+      spent7dCents: window.spentCents,
+      freesUpAt: window.freesUpAt,
       pendingRequests: pending,
-      ...controls,
+      ...controlsDto(controlsRowData),
     };
   }
 
@@ -604,7 +593,7 @@ export function createBank(db, clock = () => new Date()) {
   }
 
   /** The parent's view of everything happening in the family, newest first. */
-  function familyActivity(parentId, { kidId = null, before = null, limit = 30 } = {}) {
+  async function familyActivity(parentId, { kidId = null, before = null, limit = 30 } = {}) {
     const kindList = KID_ONLY_KINDS.map(() => '?').join(',');
     const where = [];
     const args = [];
@@ -619,7 +608,7 @@ export function createBank(db, clock = () => new Date()) {
       where.push('t.id < ?');
       args.push(before);
     }
-    const rows = q(
+    const rows = await q(
       `SELECT t.*, u.id AS owner_id, u.name AS owner_name, u.avatar AS owner_avatar, u.color AS owner_color, u.role AS owner_role
        FROM transactions t JOIN users u ON u.id = t.user_id
        WHERE ${where.join(' AND ')} ORDER BY t.id DESC LIMIT ?`,
@@ -628,8 +617,8 @@ export function createBank(db, clock = () => new Date()) {
     return { items, nextBefore: rows.length > limit ? items[items.length - 1].id : null };
   }
 
-  function kidActivity(kidId, { before = null, limit = 30 } = {}) {
-    const rows = q(
+  async function kidActivity(kidId, { before = null, limit = 30 } = {}) {
+    const rows = await q(
       `SELECT * FROM transactions WHERE user_id = ? ${before ? 'AND id < ?' : ''} ORDER BY id DESC LIMIT ?`,
     ).all(...(before ? [kidId, before, limit + 1] : [kidId, limit + 1]));
     const items = rows.slice(0, limit).map(txDto);
@@ -649,27 +638,30 @@ export function createBank(db, clock = () => new Date()) {
     };
   }
 
-  function requestsForParent(parentId, { status = null, limit = 50 } = {}) {
-    return q(
+  async function requestsForParent(parentId, { status = null, limit = 50 } = {}) {
+    const rows = await q(
       `SELECT r.*, k.name AS kid_name, k.avatar AS kid_avatar, k.color AS kid_color
        FROM money_requests r JOIN users k ON k.id = r.kid_id
        WHERE k.parent_id = ? ${status ? 'AND r.status = ?' : ''}
        ORDER BY (r.status = 'pending') DESC, r.id DESC LIMIT ?`,
-    )
-      .all(...(status ? [parentId, status, limit] : [parentId, limit]))
-      .map(requestDto);
+    ).all(...(status ? [parentId, status, limit] : [parentId, limit]));
+    return rows.map(requestDto);
   }
 
-  function requestsForKid(kidId, limit = 20) {
-    return q('SELECT * FROM money_requests WHERE kid_id = ? ORDER BY (status = \'pending\') DESC, id DESC LIMIT ?')
-      .all(kidId, limit)
-      .map(requestDto);
+  async function requestsForKid(kidId, limit = 20) {
+    const rows = await q("SELECT * FROM money_requests WHERE kid_id = ? ORDER BY (status = 'pending') DESC, id DESC LIMIT ?").all(kidId, limit);
+    return rows.map(requestDto);
   }
 
-  function parentOverview(parentId) {
-    const parent = getUser(parentId);
-    const kids = q("SELECT * FROM users WHERE parent_id = ? AND role = 'kid' ORDER BY id").all(parentId).map(kidSummary);
-    const hasFunds = !!q("SELECT 1 FROM transactions WHERE user_id = ? AND kind = 'deposit' LIMIT 1").get(parentId);
+  async function parentOverview(parentId) {
+    const [parent, kidRows, depositRow, pendingRequests, recent] = await Promise.all([
+      getUser(parentId),
+      q("SELECT * FROM users WHERE parent_id = ? AND role = 'kid' ORDER BY id").all(parentId),
+      q("SELECT 1 AS x FROM transactions WHERE user_id = ? AND kind = 'deposit' LIMIT 1").get(parentId),
+      requestsForParent(parentId, { status: 'pending' }),
+      familyActivity(parentId, { limit: 8 }),
+    ]);
+    const kids = await Promise.all(kidRows.map(kidSummary));
     return {
       balanceCents: parent.balance_cents,
       kids,
@@ -678,71 +670,78 @@ export function createBank(db, clock = () => new Date()) {
         kidsSavedCents: kids.reduce((s, k) => s + k.savedCents, 0),
         spent7dCents: kids.reduce((s, k) => s + k.spent7dCents, 0),
       },
-      pendingRequests: requestsForParent(parentId, { status: 'pending' }),
-      recent: familyActivity(parentId, { limit: 8 }).items,
+      pendingRequests,
+      recent: recent.items,
       onboarding: {
-        funds: hasFunds || parent.balance_cents > 0,
+        funds: !!depositRow || parent.balance_cents > 0,
         kid: kids.length > 0,
         allowance: kids.some((k) => k.allowance.active),
       },
     };
   }
 
-  function kidDetail(parentId, kidId) {
-    const kid = ownKid(parentId, kidId);
-    const zone = parentZone(kid);
+  async function kidDetail(parentId, kidId) {
+    const kid = await ownKid(parentId, kidId);
+    const zone = await parentZone(kid);
     const days = 14;
     const today = dateInZone(clock(), zone);
     const buckets = new Map();
     for (let i = days - 1; i >= 0; i--) buckets.set(addDays(today, -i), 0);
     const since = new Date(clock().getTime() - (days + 1) * DAY_MS).toISOString();
-    for (const r of q("SELECT amount_cents, created_at FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?").all(kidId, since)) {
+    const [spends, summary, goals, recent, requests] = await Promise.all([
+      q("SELECT amount_cents, created_at FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?").all(kidId, since),
+      kidSummary(kid),
+      goalsFor(kidId),
+      familyActivity(parentId, { kidId, limit: 10 }),
+      requestsForKid(kidId, 5),
+    ]);
+    for (const r of spends) {
       const d = dateInZone(new Date(r.created_at), zone);
       if (buckets.has(d)) buckets.set(d, buckets.get(d) - r.amount_cents);
     }
     return {
-      kid: kidSummary(kid),
-      goals: goalsFor(kidId),
+      kid: summary,
+      goals,
       spendByDay: [...buckets].map(([date, spentCents]) => ({ date, spentCents })),
-      recent: familyActivity(parentId, { kidId, limit: 10 }).items,
-      requests: requestsForKid(kidId, 5),
+      recent: recent.items,
+      requests,
       today,
     };
   }
 
-  function kidOverview(kidId) {
-    const kid = getUser(kidId);
-    const parent = getUser(kid.parent_id);
+  async function kidOverview(kidId) {
+    const kid = await getUser(kidId);
+    const parent = await getUser(kid.parent_id);
+    const [summary, goals, recent, requests] = await Promise.all([kidSummary(kid), goalsFor(kidId), kidActivity(kidId, { limit: 6 }), requestsForKid(kidId, 10)]);
     return {
-      kid: kidSummary(kid),
+      kid: summary,
       parentName: parent.name,
-      goals: goalsFor(kidId),
-      recent: kidActivity(kidId, { limit: 6 }).items,
-      requests: requestsForKid(kidId, 10),
+      goals,
+      recent: recent.items,
+      requests,
       today: dateInZone(clock(), parent.timezone),
     };
   }
 
-  function listNotifications(userId, limit = 30) {
-    const items = q('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?')
-      .all(userId, limit)
-      .map((n) => ({ id: n.id, icon: n.icon, title: n.title, body: n.body, link: n.link, read: !!n.read, createdAt: n.created_at }));
-    const unread = q('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0').get(userId).n;
+  async function listNotifications(userId, limit = 30) {
+    const [rows, unread] = await Promise.all([
+      q('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, limit),
+      countOf('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0', userId),
+    ]);
+    const items = rows.map((n) => ({ id: n.id, icon: n.icon, title: n.title, body: n.body, link: n.link, read: !!n.read, createdAt: n.created_at }));
     return { items, unread };
   }
 
-  function markNotificationsRead(userId) {
-    q('UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0').run(userId);
+  async function markNotificationsRead(userId) {
+    await q('UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0').run(userId);
   }
 
   function pendingRequestCount(parentId) {
-    return q(
-      "SELECT COUNT(*) AS n FROM money_requests r JOIN users k ON k.id = r.kid_id WHERE k.parent_id = ? AND r.status = 'pending'",
-    ).get(parentId).n;
+    return countOf("SELECT COUNT(*) AS n FROM money_requests r JOIN users k ON k.id = r.kid_id WHERE k.parent_id = ? AND r.status = 'pending'", parentId);
   }
 
   function unreadCount(userId) {
-    return q('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0').get(userId).n;
+    return countOf('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0', userId);
   }
 
   return {

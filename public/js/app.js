@@ -93,12 +93,33 @@ window.addEventListener('nestly:signed-out', () => {
   if (state.user) showAuth('Your session ended. Please log in again.');
 });
 
+function showSetupProblem(err) {
+  stopPolling();
+  app.replaceChildren(
+    h(
+      'div',
+      { class: 'loading-screen' },
+      h(
+        'div',
+        { class: 'empty', style: { maxWidth: '460px', padding: '24px' } },
+        h('div', { class: 'art', 'aria-hidden': 'true' }, err.code === 'not_configured' ? '🛠️' : '😕'),
+        h('h3', null, err.code === 'not_configured' ? 'Nestly isn’t set up yet' : 'Can’t reach Nestly right now'),
+        h('p', null, err.message),
+        err.status ? h('p', { class: 'tiny muted' }, `Details: ${err.code ?? 'error'} · status ${err.status}`) : null,
+        h('button', { class: 'btn btn-primary', onClick: () => location.reload() }, 'Try again'),
+      ),
+    ),
+  );
+}
+
 (async function boot() {
   try {
     const session = await api.get('/session');
     if (session.user) mountApp(session);
     else showAuth();
-  } catch {
-    showAuth();
+  } catch (err) {
+    // /api/session is public and always answers 200 when the server is healthy, so ANY failure here means the
+    // server side isn't working. Say so, rather than showing a sign-in form that can't succeed.
+    showSetupProblem(err);
   }
 })();

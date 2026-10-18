@@ -1,9 +1,13 @@
-import { DatabaseSync } from 'node:sqlite';
+import { createClient } from '@libsql/client';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
+import { HttpError } from './util.js';
 import { dirname } from 'node:path';
 
-// Money is always stored as integer cents. `users.balance_cents` is the spendable
-// balance; `transactions` is the append-only history shown in the UI.
+// One async interface over libSQL (SQLite). The same code runs against a local file on your laptop or a
+// server with a disk, and against a hosted Turso database on serverless/free hosts — the only difference is
+// the URL. Money is always integer cents; `users.balance_cents` is the spendable balance and `transactions`
+// is the append-only history shown in the UI.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS sessions_expires ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS kid_controls (
   kid_id                   INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -46,7 +51,6 @@ CREATE TABLE IF NOT EXISTS kid_controls (
   allowance_next           TEXT,
   allowance_fail_notified  TEXT
 );
-
 CREATE INDEX IF NOT EXISTS controls_due ON kid_controls(allowance_next) WHERE allowance_active = 1;
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -100,14 +104,133 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, id DESC);
+
+-- Login throttling lives in the database (not memory) so it holds across serverless instances.
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key          TEXT PRIMARY KEY,
+  count        INTEGER NOT NULL DEFAULT 0,
+  locked_until INTEGER NOT NULL DEFAULT 0,
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS rate_limits_updated ON rate_limits(updated_at);
 `;
 
-export function openDb(path) {
-  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  db.exec('PRAGMA journal_mode = WAL;');
-  db.exec('PRAGMA foreign_keys = ON;');
-  db.exec('PRAGMA busy_timeout = 5000;');
-  db.exec(SCHEMA);
-  return db;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const isBusy = (err) => /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i.test(String(err?.message ?? err));
+const plain = (row) => ({ ...row });
+
+const MAX_QUEUED_WRITES = 150;
+
+export class Db {
+  #ready = null;
+  #queued = 0;
+
+  constructor(client) {
+    this.client = client;
+    this.als = new AsyncLocalStorage();
+    this.chain = Promise.resolve();
+    this.ensureReady().catch(() => {}); // start early; a failure is retried by the next caller, never cached
+  }
+
+  /**
+   * Creates the tables if needed. The in-flight promise is shared, but a FAILED attempt is forgotten so the next
+   * caller tries again — a one-off network blip at cold start must not leave this instance broken for good.
+   */
+  ensureReady() {
+    this.#ready ??= this.#init().catch((err) => {
+      this.#ready = null;
+      throw err;
+    });
+    return this.#ready;
+  }
+
+  async #init() {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.client.executeMultiple(SCHEMA);
+        return;
+      } catch (err) {
+        if (isBusy(err) && attempt < 4) await sleep(60 * 2 ** attempt);
+        else throw err;
+      }
+    }
+  }
+
+  /** Statements run on the open transaction if there is one (tracked per async call chain), else on the connection. */
+  #exec() {
+    return this.als.getStore() ?? this.client;
+  }
+
+  async all(sql, args = []) {
+    await this.ensureReady();
+    const rs = await this.#exec().execute({ sql, args });
+    return rs.rows.map(plain);
+  }
+
+  async get(sql, args = []) {
+    const rows = await this.all(sql, args);
+    return rows[0] ?? null;
+  }
+
+  async run(sql, args = []) {
+    await this.ensureReady();
+    const rs = await this.#exec().execute({ sql, args });
+    return { changes: rs.rowsAffected, lastInsertRowid: Number(rs.lastInsertRowid ?? 0) };
+  }
+
+  /**
+   * Runs fn inside one write transaction: everything commits together or not at all. Nested calls join the
+   * outer transaction. Write transactions are queued one at a time inside this process, and retried briefly if
+   * another process or instance holds the database lock — fn may therefore run more than once, so it must only
+   * touch the database.
+   */
+  atomic(fn) {
+    if (this.als.getStore()) return fn();
+    // Bounded queue: under a flood, fail fast with a friendly error instead of letting every request wait behind the rest.
+    if (this.#queued >= MAX_QUEUED_WRITES) {
+      return Promise.reject(new HttpError(503, 'busy', 'Nestly is busy right now. Please try again in a moment.'));
+    }
+    this.#queued++;
+    const run = this.chain.then(() => this.#attempt(fn)).finally(() => this.#queued--);
+    this.chain = run.catch(() => {});
+    return run;
+  }
+
+  async #attempt(fn) {
+    for (let attempt = 0; ; attempt++) {
+      let tx;
+      try {
+        await this.ensureReady();
+        tx = await this.client.transaction('write');
+        const result = await this.als.run(tx, fn);
+        await tx.commit();
+        return result;
+      } catch (err) {
+        if (tx) {
+          try {
+            await tx.rollback();
+          } catch {
+            /* already rolled back */
+          }
+        }
+        if (isBusy(err) && attempt < 5) {
+          await sleep(40 * 2 ** attempt);
+          continue;
+        }
+        throw err;
+      } finally {
+        tx?.close();
+      }
+    }
+  }
+
+  async close() {
+    this.client.close();
+  }
+}
+
+/** `url` is a libSQL URL (libsql://… for Turso) or `file:path` for a local database file. */
+export function openDb({ url, authToken }) {
+  if (url.startsWith('file:')) mkdirSync(dirname(url.slice(5)), { recursive: true });
+  return new Db(createClient({ url, authToken: authToken || undefined }));
 }
