@@ -13,6 +13,10 @@
 
 import { HttpError, cents, oneOf, FREQUENCIES, CATEGORIES, money, MAX_CENTS } from './util.js';
 import { dateInZone, firstDue, advance, addDays } from './dates.js';
+import { createBadges } from './badges.js';
+import { createChores } from './chores.js';
+import { createInterest, MAX_INTEREST_BPS, ratePercent } from './interest.js';
+import { createInsights } from './insights.js';
 
 export const KID_ONLY_KINDS = ['spend', 'goal_save', 'goal_release', 'goal_purchase'];
 export const MAX_DEPOSIT_CENTS = 50_000; // $500 of practice money at a time
@@ -83,6 +87,8 @@ export function createBank(db, clock = () => new Date()) {
       frozen: !!row.frozen,
       weeklyLimitCents: row.weekly_limit_cents,
       maxRequestCents: row.max_request_cents,
+      interestBps: row.interest_bps,
+      interestNext: row.interest_bps > 0 ? row.interest_next : null,
       allowance: {
         cents: row.allowance_cents,
         freq: row.allowance_freq,
@@ -127,6 +133,18 @@ export function createBank(db, clock = () => new Date()) {
             ? null
             : cents(input.maxRequestCents, { field: 'Request cap', min: 100, max: MAX_CENTS });
       }
+      if ('interestBps' in input) {
+        const bps = input.interestBps;
+        if (!Number.isInteger(bps) || bps < 0 || bps > MAX_INTEREST_BPS) {
+          throw new HttpError(400, 'invalid', `Interest must be between 0% and ${MAX_INTEREST_BPS / 100}% a year.`);
+        }
+        next.interest_bps = bps;
+        if (bps === 0) next.interest_next = null;
+        else if (!cur.interest_bps || !cur.interest_next) next.interest_next = firstDue(dateInZone(clock(), await parentZone(kid)), 'weekly', 0); // next Sunday
+        if (bps > 0 && bps !== cur.interest_bps) {
+          notes.push({ icon: '📈', title: 'Your savings now earn interest!', body: `${ratePercent(bps)} a year on what you save in goals, paid every week.` });
+        }
+      }
       if ('allowance' in input) {
         const a = input.allowance ?? {};
         const freq = oneOf(a.freq, FREQUENCIES, { field: 'Frequency' });
@@ -158,7 +176,8 @@ export function createBank(db, clock = () => new Date()) {
 
       await q(
         `UPDATE kid_controls SET frozen = ?, weekly_limit_cents = ?, max_request_cents = ?, allowance_cents = ?,
-           allowance_freq = ?, allowance_day = ?, allowance_active = ?, allowance_next = ?, allowance_fail_notified = ?
+           allowance_freq = ?, allowance_day = ?, allowance_active = ?, allowance_next = ?, allowance_fail_notified = ?,
+           interest_bps = ?, interest_next = ?
          WHERE kid_id = ?`,
       ).run(
         next.frozen,
@@ -170,6 +189,8 @@ export function createBank(db, clock = () => new Date()) {
         next.allowance_active,
         next.allowance_next,
         next.allowance_fail_notified,
+        next.interest_bps,
+        next.interest_next,
         kidId,
       );
       for (const n of notes) await notify(kidId, { ...n, link: '#/' });
@@ -272,8 +293,11 @@ export function createBank(db, clock = () => new Date()) {
       }
       // Explicit deletes (children first) so correctness never depends on the database enforcing ON DELETE rules.
       await q('UPDATE transactions SET counterparty_id = NULL WHERE counterparty_id = ?').run(kidId);
-      for (const table of ['transactions', 'goals', 'money_requests', 'notifications', 'sessions']) {
-        await q(`DELETE FROM ${table} WHERE ${table === 'goals' || table === 'money_requests' ? 'kid_id' : 'user_id'} = ?`).run(kidId);
+      await q('DELETE FROM chore_claims WHERE kid_id = ?').run(kidId);
+      await q('DELETE FROM chores WHERE kid_id = ?').run(kidId);
+      await q('DELETE FROM badges WHERE kid_id = ?').run(kidId);
+      for (const [table, column] of [['transactions', 'user_id'], ['goals', 'kid_id'], ['money_requests', 'kid_id'], ['notifications', 'user_id'], ['sessions', 'user_id']]) {
+        await q(`DELETE FROM ${table} WHERE ${column} = ?`).run(kidId);
       }
       await q('DELETE FROM kid_controls WHERE kid_id = ?').run(kidId);
       await q('DELETE FROM users WHERE id = ?').run(kidId);
@@ -459,6 +483,7 @@ export function createBank(db, clock = () => new Date()) {
         targetCents,
         nowIso(),
       );
+      await core.awardBadges(kidId);
       return Number(info.lastInsertRowid);
     });
   }
@@ -478,6 +503,7 @@ export function createBank(db, clock = () => new Date()) {
       await q('UPDATE goals SET saved_cents = saved_cents + ? WHERE id = ?').run(amount, goalId);
       await post(kidId, { kind: 'goal_save', amount: -amount, counterparty: { id: null, name: goal.name }, goalId });
       const now = await goalRow(kidId, goalId);
+      await core.awardBadges(kidId);
       return { reached: now.saved_cents >= now.target_cents };
     });
   }
@@ -517,6 +543,7 @@ export function createBank(db, clock = () => new Date()) {
         body: `They saved up ${money(goal.saved_cents)} for it. 🎉`,
         link: `#/kids/${kidId}`,
       });
+      await core.awardBadges(kidId);
     });
   }
 
@@ -654,12 +681,13 @@ export function createBank(db, clock = () => new Date()) {
   }
 
   async function parentOverview(parentId) {
-    const [parent, kidRows, depositRow, pendingRequests, recent] = await Promise.all([
+    const [parent, kidRows, depositRow, pendingRequests, recent, pendingChores] = await Promise.all([
       getUser(parentId),
       q("SELECT * FROM users WHERE parent_id = ? AND role = 'kid' ORDER BY id").all(parentId),
       q("SELECT 1 AS x FROM transactions WHERE user_id = ? AND kind = 'deposit' LIMIT 1").get(parentId),
       requestsForParent(parentId, { status: 'pending' }),
       familyActivity(parentId, { limit: 8 }),
+      core.chores.pendingClaimsForParent(parentId, 20),
     ]);
     const kids = await Promise.all(kidRows.map(kidSummary));
     return {
@@ -671,6 +699,7 @@ export function createBank(db, clock = () => new Date()) {
         spent7dCents: kids.reduce((s, k) => s + k.spent7dCents, 0),
       },
       pendingRequests,
+      pendingChores,
       recent: recent.items,
       onboarding: {
         funds: !!depositRow || parent.balance_cents > 0,
@@ -688,12 +717,13 @@ export function createBank(db, clock = () => new Date()) {
     const buckets = new Map();
     for (let i = days - 1; i >= 0; i--) buckets.set(addDays(today, -i), 0);
     const since = new Date(clock().getTime() - (days + 1) * DAY_MS).toISOString();
-    const [spends, summary, goals, recent, requests] = await Promise.all([
+    const [spends, summary, goals, recent, requests, badges] = await Promise.all([
       q("SELECT amount_cents, created_at FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?").all(kidId, since),
       kidSummary(kid),
       goalsFor(kidId),
       familyActivity(parentId, { kidId, limit: 10 }),
       requestsForKid(kidId, 5),
+      core.badges.badgesFor(kidId),
     ]);
     for (const r of spends) {
       const d = dateInZone(new Date(r.created_at), zone);
@@ -705,6 +735,7 @@ export function createBank(db, clock = () => new Date()) {
       spendByDay: [...buckets].map(([date, spentCents]) => ({ date, spentCents })),
       recent: recent.items,
       requests,
+      badges,
       today,
     };
   }
@@ -712,13 +743,22 @@ export function createBank(db, clock = () => new Date()) {
   async function kidOverview(kidId) {
     const kid = await getUser(kidId);
     const parent = await getUser(kid.parent_id);
-    const [summary, goals, recent, requests] = await Promise.all([kidSummary(kid), goalsFor(kidId), kidActivity(kidId, { limit: 6 }), requestsForKid(kidId, 10)]);
+    const [summary, goals, recent, requests, badges, chores] = await Promise.all([
+      kidSummary(kid),
+      goalsFor(kidId),
+      kidActivity(kidId, { limit: 6 }),
+      requestsForKid(kidId, 10),
+      core.badges.badgesFor(kidId),
+      core.chores.choresForKid(kidId),
+    ]);
     return {
       kid: summary,
       parentName: parent.name,
       goals,
       recent: recent.items,
       requests,
+      badges,
+      chores,
       today: dateInZone(clock(), parent.timezone),
     };
   }
@@ -736,15 +776,40 @@ export function createBank(db, clock = () => new Date()) {
     await q('UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0').run(userId);
   }
 
-  function pendingRequestCount(parentId) {
-    return countOf("SELECT COUNT(*) AS n FROM money_requests r JOIN users k ON k.id = r.kid_id WHERE k.parent_id = ? AND r.status = 'pending'", parentId);
+  async function pendingRequestCount(parentId) {
+    const [requests, chores] = await Promise.all([
+      countOf("SELECT COUNT(*) AS n FROM money_requests r JOIN users k ON k.id = r.kid_id WHERE k.parent_id = ? AND r.status = 'pending'", parentId),
+      countOf("SELECT COUNT(*) AS n FROM chore_claims cc JOIN chores c ON c.id = cc.chore_id WHERE c.parent_id = ? AND cc.status = 'pending'", parentId),
+    ]);
+    return requests + chores;
   }
 
   function unreadCount(userId) {
     return countOf('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0', userId);
   }
 
+  // ───────────────────────── feature modules ─────────────────────────
+  // Each module gets the same small toolbox: the transaction wrapper, ledger helpers and lookups.
+  const core = { db, q, atomic, clock, nowIso, post, transfer, notify, getUser, ownKid, controlsRow, parentZone, notFound };
+  core.badges = createBadges(core);
+  core.awardBadges = core.badges.awardBadges;
+  core.chores = createChores(core);
+  const interest = createInterest(core);
+  const insights = createInsights(core);
+
+  /** Everything that should happen "on a schedule": allowances and savings interest. */
+  async function runScheduled() {
+    const allowances = await runAllowances();
+    const interestPaid = await interest.runInterest();
+    return { allowances, interest: interestPaid };
+  }
+
   return {
+    ...core.chores,
+    ...core.badges,
+    ...insights,
+    runInterest: interest.runInterest,
+    runScheduled,
     atomic,
     getUser,
     ownKid,

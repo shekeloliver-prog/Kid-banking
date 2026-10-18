@@ -1,5 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import { HttpError, text, cents, oneOf, password, email, username, id, timezone, AVATARS, COLORS, CATEGORIES } from './lib/util.js';
+import { CHORE_EMOJI, REPEATS, MIN_REWARD_CENTS, MAX_REWARD_CENTS } from './lib/chores.js';
+import { INSIGHT_RANGES, activityCsv } from './lib/insights.js';
+import { RawResponse } from './lib/http.js';
 import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions, purgeExpiredSessions, AttemptLimiter } from './lib/auth.js';
 
 const KID_PIN_MIN = 6;
@@ -108,9 +111,9 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     const a = Buffer.from(header);
     const b = Buffer.from(expected);
     if (!cronSecret || a.length !== b.length || !timingSafeEqual(a, b)) throw new HttpError(401, 'unauthenticated', 'Not allowed.');
-    const paid = await bank.runAllowances();
+    const ran = await bank.runScheduled();
     await purgeExpiredSessions(db, clock());
-    return { paid: paid.length };
+    return { paid: ran.allowances.length, interest: ran.interest.length };
   });
 
   // ───────────── auth ─────────────
@@ -253,7 +256,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
 
   put('/api/kids/:id/controls', 'parent', (ctx) => {
     const input = {};
-    for (const key of ['frozen', 'weeklyLimitCents', 'maxRequestCents', 'allowance']) if (key in ctx.body) input[key] = ctx.body[key];
+    for (const key of ['frozen', 'weeklyLimitCents', 'maxRequestCents', 'allowance', 'interestBps']) if (key in ctx.body) input[key] = ctx.body[key];
     return bank.updateControls(ctx.user.id, id(ctx.params.id), input);
   });
 
@@ -287,7 +290,53 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     return bank.familyActivity(ctx.user.id, { kidId, ...pageParams(ctx) });
   });
 
+  // ───────────── parent: chores ─────────────
+  const choreInput = (body) => ({
+    title: text(body.title, { field: 'Chore', max: 60 }),
+    emoji: oneOf(body.emoji ?? CHORE_EMOJI[0], CHORE_EMOJI, { field: 'Emoji' }),
+    rewardCents: cents(body.rewardCents, { field: 'Reward', min: MIN_REWARD_CENTS, max: MAX_REWARD_CENTS }),
+    repeat: oneOf(body.repeat ?? 'once', REPEATS, { field: 'Repeat' }),
+  });
+  get('/api/chores', 'parent', (ctx) => bank.choresForParent(ctx.user.id));
+  post('/api/chores', 'parent', async (ctx) => ({
+    id: await bank.createChore(ctx.user.id, id(ctx.body.kidId), choreInput(ctx.body)),
+  }));
+  patch('/api/chores/:id', 'parent', async (ctx) => {
+    await bank.updateChore(ctx.user.id, id(ctx.params.id), choreInput(ctx.body));
+    return { ok: true };
+  });
+  del('/api/chores/:id', 'parent', async (ctx) => {
+    await bank.archiveChore(ctx.user.id, id(ctx.params.id));
+    return { ok: true };
+  });
+  post('/api/chore-claims/:id/approve', 'parent', (ctx) => bank.decideClaim(ctx.user.id, id(ctx.params.id), true, note(ctx.body.note)));
+  post('/api/chore-claims/:id/reject', 'parent', (ctx) => bank.decideClaim(ctx.user.id, id(ctx.params.id), false, note(ctx.body.note)));
+
+  // ───────────── parent: insights + export ─────────────
+  get('/api/insights', 'parent', (ctx) => {
+    const days = Number(ctx.query.get('days') ?? 30);
+    if (!INSIGHT_RANGES.includes(days)) throw new HttpError(400, 'invalid', 'Pick 7, 30 or 90 days.');
+    const kidParam = ctx.query.get('kid');
+    return bank.insights(ctx.user.id, { days, kidId: kidParam ? id(kidParam) : null });
+  });
+
+  get('/api/export.csv', 'parent', async (ctx) => {
+    const kidParam = ctx.query.get('kid');
+    const kidId = kidParam ? id(kidParam) : null;
+    if (kidId) await bank.ownKid(ctx.user.id, kidId);
+    const { items } = await bank.familyActivity(ctx.user.id, { kidId, limit: 5000 });
+    const stamp = clock().toISOString().slice(0, 10);
+    return new RawResponse(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="nestly-activity-${stamp}.csv"` }, activityCsv(items.reverse()));
+  });
+
   // ───────────── kid ─────────────
+  get('/api/kid/chores', 'kid', (ctx) => bank.choresForKid(ctx.user.id));
+  post('/api/kid/chores/:id/claim', 'kid', async (ctx) => ({ id: await bank.claimChore(ctx.user.id, id(ctx.params.id)) }));
+  del('/api/kid/chore-claims/:id', 'kid', async (ctx) => {
+    await bank.cancelClaim(ctx.user.id, id(ctx.params.id));
+    return { ok: true };
+  });
+
   get('/api/kid/overview', 'kid', (ctx) => bank.kidOverview(ctx.user.id));
   get('/api/kid/activity', 'kid', (ctx) => bank.kidActivity(ctx.user.id, pageParams(ctx)));
 

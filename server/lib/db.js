@@ -2,13 +2,14 @@ import { createClient } from '@libsql/client';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { HttpError } from './util.js';
+import { MIGRATIONS } from './migrations.js';
 import { dirname } from 'node:path';
 
 // One async interface over libSQL (SQLite). The same code runs against a local file on your laptop or a
 // server with a disk, and against a hosted Turso database on serverless/free hosts — the only difference is
 // the URL. Money is always integer cents; `users.balance_cents` is the spendable balance and `transactions`
 // is the append-only history shown in the UI.
-const SCHEMA = `
+export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   role          TEXT NOT NULL CHECK (role IN ('parent', 'kid')),
@@ -115,6 +116,10 @@ CREATE TABLE IF NOT EXISTS rate_limits (
 CREATE INDEX IF NOT EXISTS rate_limits_updated ON rate_limits(updated_at);
 `;
 
+// The schema as individual statements, so it can run as one all-or-nothing batch (executeMultiple can leave a
+// half-run statement on the connection when it hits a lock, which then poisons every retry).
+const SCHEMA_STATEMENTS = SCHEMA.split(/;[ \t]*\n/).map((t) => t.trim()).filter((t) => t && !/^(--[^\n]*\n?)+$/.test(t));
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isBusy = (err) => /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i.test(String(err?.message ?? err));
 const plain = (row) => ({ ...row });
@@ -145,14 +150,44 @@ export class Db {
   }
 
   async #init() {
+    // Several processes (or serverless instances) may start together on one database: be patient and jitter the retries.
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.client.executeMultiple(SCHEMA);
+        await this.client.batch(SCHEMA_STATEMENTS, 'write'); // version 1: idempotent CREATE ... IF NOT EXISTS, all or nothing
+        await this.client.execute(
+          'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
+        );
+        for (const migration of MIGRATIONS) await this.#migrate(migration);
         return;
       } catch (err) {
-        if (isBusy(err) && attempt < 4) await sleep(60 * 2 ** attempt);
+        if (isBusy(err) && attempt < 12) await sleep(Math.min(50 * 2 ** attempt, 600) * (0.5 + Math.random()));
         else throw err;
       }
+    }
+  }
+
+  /** Applies one migration unless it is already recorded. Check + apply + record are one write transaction. */
+  async #migrate({ version, name, statements }) {
+    const tx = await this.client.transaction('write');
+    try {
+      const done = await tx.execute({ sql: 'SELECT 1 FROM schema_migrations WHERE version = ?', args: [version] });
+      if (!done.rows.length) {
+        for (const sql of statements) await tx.execute(sql);
+        await tx.execute({
+          sql: 'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
+          args: [version, name, new Date().toISOString()],
+        });
+      }
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        /* already rolled back */
+      }
+      throw err;
+    } finally {
+      tx.close();
     }
   }
 

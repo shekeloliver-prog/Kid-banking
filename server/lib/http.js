@@ -25,6 +25,13 @@ export const SECURITY_HEADERS = {
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
 };
 
+/** Lets a route answer with something other than JSON (e.g. a CSV download). */
+export class RawResponse {
+  constructor(status, headers, body) {
+    Object.assign(this, { status, headers, body });
+  }
+}
+
 export function sendJson(res, status, data, headers = {}) {
   const body = data === undefined ? '' : JSON.stringify(data);
   res.writeHead(status, {

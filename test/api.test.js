@@ -711,10 +711,11 @@ test('behind a proxy only the entry the proxy added is trusted; client-supplied 
 test('database setup that fails once is retried by the next request instead of staying broken', async () => {
   let calls = 0;
   const fake = {
-    executeMultiple: async () => {
+    batch: async () => {
       if (++calls === 1) throw new Error('network blip');
     },
     execute: async () => ({ rows: [{ x: 1 }], rowsAffected: 0, lastInsertRowid: 0n }),
+    transaction: async () => ({ execute: async () => ({ rows: [{ x: 1 }] }), commit: async () => {}, rollback: async () => {}, close() {} }),
     close() {},
   };
   const db = new Db(fake);

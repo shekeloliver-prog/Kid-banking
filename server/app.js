@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDb } from './lib/db.js';
 import { createBank } from './lib/bank.js';
-import { Router, readJson, sendJson, parseCookies, serveStatic, SECURITY_HEADERS } from './lib/http.js';
+import { Router, RawResponse, readJson, sendJson, parseCookies, serveStatic, SECURITY_HEADERS } from './lib/http.js';
 import { HttpError } from './lib/util.js';
 import { AttemptLimiter, lookupSession, purgeExpiredSessions, ipKey, SESSION_COOKIE, SESSION_TTL_MS } from './lib/auth.js';
 import { registerRoutes } from './routes.js';
@@ -36,7 +36,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
     if (!lazyAllowances || Date.now() - lastLazyRun < 60_000) return;
     lastLazyRun = Date.now();
     try {
-      await bank.runAllowances();
+      await bank.runScheduled();
       if (Date.now() - lastPurge > 60 * 60 * 1000) {
         lastPurge = Date.now();
         await purgeExpiredSessions(db, clock());
@@ -121,6 +121,11 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
     };
 
     const result = await route.handler(ctx);
+    if (result instanceof RawResponse) {
+      res.writeHead(result.status, { 'Cache-Control': 'no-store', ...result.headers });
+      res.end(result.body);
+      return;
+    }
     sendJson(res, 200, result ?? { ok: true }, ctx.cookieHeaders.length ? { 'Set-Cookie': ctx.cookieHeaders } : {});
   }
 
@@ -156,7 +161,7 @@ export function createApp({ dbUrl, authToken, clock = () => new Date(), trustPro
     const tick = async () => {
       try {
         await db.ensureReady();
-        await bank.runAllowances();
+        await bank.runScheduled();
         await purgeExpiredSessions(db, clock());
       } catch (err) {
         console.error('Background job failed', err);
