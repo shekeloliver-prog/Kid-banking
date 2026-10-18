@@ -174,13 +174,17 @@ export function createChores(core) {
 
   async function choresForKid(kidId) {
     const kid = await getUser(kidId);
-    const zone = await parentZone(kid);
-    const rows = await q("SELECT * FROM chores WHERE kid_id = ? AND status = 'active' ORDER BY id").all(kidId);
-    const withState = [];
-    for (const c of rows) {
-      const latest = await latestClaim(c.id);
-      withState.push({ ...choreDto(c), ...availability(c, latest, zone), claimId: latest?.status === 'pending' ? latest.id : null });
-    }
+    const [zone, rows, latestRows] = await Promise.all([
+      parentZone(kid),
+      q("SELECT * FROM chores WHERE kid_id = ? AND status = 'active' ORDER BY id").all(kidId),
+      // The newest pending-or-approved claim of every chore, in one query (not one per chore).
+      q("SELECT * FROM chore_claims WHERE id IN (SELECT MAX(id) FROM chore_claims WHERE kid_id = ? AND status IN ('pending', 'approved') GROUP BY chore_id)").all(kidId),
+    ]);
+    const latestBy = new Map(latestRows.map((r) => [r.chore_id, r]));
+    const withState = rows.map((c) => {
+      const latest = latestBy.get(c.id);
+      return { ...choreDto(c), ...availability(c, latest, zone), claimId: latest?.status === 'pending' ? latest.id : null };
+    });
     const recent = await q(
       `SELECT cc.*, c.title, c.emoji FROM chore_claims cc JOIN chores c ON c.id = cc.chore_id
        WHERE cc.kid_id = ? AND cc.status IN ('approved', 'rejected') ORDER BY cc.id DESC LIMIT 8`,

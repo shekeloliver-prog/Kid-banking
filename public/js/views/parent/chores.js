@@ -50,18 +50,21 @@ export const choresView = defineView({
                 kids.flatMap((k) => {
                   const mine = byKid.get(k.id) ?? [];
                   return [
-                    h('div', { class: 'kid-group', dataset: { color: k.color } }, avatar(k, 'xs'), k.name, h('span', { class: 'grow' }), h('button', { class: 'btn btn-ghost btn-sm', onClick: () => add(k.id) }, icon('plus', 16), 'Add')),
+                    h('div', { class: 'kid-group', dataset: { color: k.color } }, avatar(k, 'xs'), h('span', { class: 'ellipsis' }, k.name), h('span', { class: 'grow' }), h('button', { class: 'btn btn-ghost btn-sm', onClick: () => add(k.id) }, icon('plus', 16), 'Add')),
                     ...(mine.length
                       ? mine.map((c) =>
                           h(
                             'div',
                             { class: 'chore-row' },
                             h('div', { class: 'row-icon', 'aria-hidden': 'true' }, c.emoji),
-                            h('div', { class: 'row-main' }, h('div', { class: 'row-title ellipsis' }, c.title), h('div', { class: 'row-sub' }, [REPEAT_LABEL[c.repeat], c.doneCount ? `done ${c.doneCount}×` : null].filter(Boolean).join(' · '))),
-                            c.pendingClaimId ? pill('Waiting for you', 'warn') : null,
-                            h('div', { class: 'reward' }, money(c.rewardCents)),
-                            h('button', { class: 'btn btn-ghost btn-icon btn-sm', 'aria-label': `Edit ${c.title}`, onClick: () => choreDialog({ kids, chore: c, onDone: soft }) }, icon('edit', 17)),
-                            h('button', { class: 'btn btn-ghost btn-icon btn-sm', 'aria-label': `Remove ${c.title}`, onClick: () => remove(c) }, icon('trash', 17)),
+                            h('div', { class: 'row-main' }, h('div', { class: 'row-title ellipsis' }, c.title), h('div', { class: 'row-sub' }, [REPEAT_LABEL[c.repeat], c.doneCount ? `done ${c.doneCount}×` : null].filter(Boolean).join(' · '), c.pendingClaimId ? h('div', null, pill('Waiting for you', 'warn')) : null)),
+                            h(
+                              'div',
+                              { class: 'chore-actions' },
+                              h('div', { class: 'reward', style: { marginRight: '4px' } }, money(c.rewardCents)),
+                              h('button', { class: 'btn btn-ghost btn-icon btn-sm', 'aria-label': `Edit ${c.title}`, onClick: () => choreDialog({ kids, chore: c, onDone: soft }) }, icon('edit', 17)),
+                              h('button', { class: 'btn btn-ghost btn-icon btn-sm', 'aria-label': `Remove ${c.title}`, onClick: () => remove(c) }, icon('trash', 17)),
+                            ),
                           ),
                         )
                       : [h('div', { class: 'chore-row muted small' }, 'No chores for this kid yet.')]),

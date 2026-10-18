@@ -81,13 +81,13 @@
 
 /* Kid accent palettes: gradient stops, a soft tint, and the ink that sits on the gradient. */
 [data-color="violet"] { --a1: #8a6bff; --a2: #4f3df5; --a-soft: #ecebff; --a-ink: #fff; --a-solid: #6a4cf7; }
-[data-color="blue"]   { --a1: #4aa8ff; --a2: #2363e6; --a-soft: #e4efff; --a-ink: #fff; --a-solid: #2f7cf0; }
-[data-color="teal"]   { --a1: #28d3bf; --a2: #0b8a8c; --a-soft: #ddf6f2; --a-ink: #fff; --a-solid: #0f9d97; }
-[data-color="green"]  { --a1: #4fd98a; --a2: #11924f; --a-soft: #def6e8; --a-ink: #fff; --a-solid: #1aa860; }
+[data-color="blue"]   { --a1: #4aa8ff; --a2: #2363e6; --a-soft: #e4efff; --a-ink: #fff; --a-solid: #2b72dc; }
+[data-color="teal"]   { --a1: #28d3bf; --a2: #0b8a8c; --a-soft: #ddf6f2; --a-ink: #fff; --a-solid: #0c837e; }
+[data-color="green"]  { --a1: #4fd98a; --a2: #11924f; --a-soft: #def6e8; --a-ink: #fff; --a-solid: #14864c; }
 [data-color="amber"]  { --a1: #ffd04d; --a2: #f2a100; --a-soft: #fff1cf; --a-ink: #3a2600; --a-solid: #f2a100; }
-[data-color="orange"] { --a1: #ffab5e; --a2: #ee5f16; --a-soft: #ffe8d6; --a-ink: #fff; --a-solid: #f27a2c; }
-[data-color="pink"]   { --a1: #ff7eb6; --a2: #dc2f84; --a-soft: #ffe0ee; --a-ink: #fff; --a-solid: #ec4a96; }
-[data-color="red"]    { --a1: #ff7a7a; --a2: #d92f46; --a-soft: #ffe1e4; --a-ink: #fff; --a-solid: #ea4a5c; }
+[data-color="orange"] { --a1: #ffab5e; --a2: #ee5f16; --a-soft: #ffe8d6; --a-ink: #2b1400; --a-solid: #f27a2c; }
+[data-color="pink"]   { --a1: #ff7eb6; --a2: #dc2f84; --a-soft: #ffe0ee; --a-ink: #fff; --a-solid: #ca3f80; }
+[data-color="red"]    { --a1: #ff7a7a; --a2: #d92f46; --a-soft: #ffe1e4; --a-ink: #fff; --a-solid: #cd4150; }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) [data-color] { --a-soft: color-mix(in srgb, var(--a-solid) 22%, var(--surface)); }
@@ -583,6 +583,7 @@ a.row:hover, button.row:hover { background: var(--surface-2); }
 .auth-mobile-brand { display: none; }
 
 /* ───────── 7. pages ───────── */
+.two-col > * { min-width: 0; }
 .two-col { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: 22px; align-items: start; }
 .kid-head { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .kid-head h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.03em; }
@@ -659,7 +660,7 @@ dialog.modal::backdrop { background: rgba(10, 12, 30, 0.5); backdrop-filter: blu
 
 /* ───────── 9. responsive ───────── */
 @media (max-width: 1020px) {
-  .two-col { grid-template-columns: 1fr; }
+  .two-col { grid-template-columns: minmax(0, 1fr); }
   .steps { grid-template-columns: 1fr; }
 }
 @media (max-width: 880px) {
@@ -838,13 +839,41 @@ dialog.modal::backdrop { background: rgba(10, 12, 30, 0.5); backdrop-filter: blu
   .hbar-track { grid-column: 1 / 3; grid-row: 2; }
   .badges { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .badges.compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .chore-row { padding: 12px 16px; flex-wrap: wrap; }
+  .chore-row { padding: 12px 16px; }
   .kid-group { padding-left: 16px; }
 }
 
 @media (max-width: 560px) {
-  .chore-row > .reward { margin-left: auto; }
   .chore-card { padding: 14px; gap: 12px; }
   .chore-card .e { width: 44px; height: 44px; font-size: 24px; border-radius: 14px; }
   .chore-card .btn { padding: 0 14px; }
+}
+
+/* ───────── 12. fixes from the v2 review ───────── */
+/* flush cards stay flush on phones (the phone .card padding used to win) */
+.card.card-flush { padding: 0; }
+/* long names / titles never push controls off screen */
+.kid-group > :not(.grow):not(.avatar):not(.btn) { min-width: 0; }
+.kid-group { min-width: 0; }
+.kid-top-in b { min-width: 0; max-width: 38vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chore-card .grow, .request-card .grow, .chore-row .row-main { min-width: 0; }
+.chore-card .row-title, .request-card .row-title, .chore-row .row-title { overflow-wrap: anywhere; }
+.chore-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.chore-row .row-sub .pill { margin-top: 6px; }
+/* kid chore states: dim the artwork, never the words */
+.chore-card.is-cooldown { opacity: 1; }
+.chore-card.is-cooldown .e { opacity: 0.55; filter: grayscale(0.4); }
+.chore-card.is-cooldown .row-title { color: var(--text-2); }
+.chore-card.is-pending .row-sub, .chore-card.is-pending .small { color: var(--text-2); }
+/* locked badge hint is visible text, not just a tooltip */
+.badge-tile.locked .badge-text { display: block; opacity: 1; color: var(--text-2); }
+.compact .badge-text { font-size: 11px; }
+@media (max-width: 560px) {
+  .control { flex-wrap: wrap; }
+  .control > .seg { width: 100%; }
+  .control > .seg button { flex: 1; padding: 0 8px; justify-content: center; }
+  .table th, .table td { padding-left: 6px; padding-right: 6px; }
+  .table td:first-child { max-width: 38vw; }
+  .chore-row { flex-wrap: nowrap; padding: 12px 14px; gap: 10px; }
+  .kid-group { padding-left: 16px; padding-right: 12px; }
 }

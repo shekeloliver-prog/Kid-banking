@@ -27,7 +27,7 @@ export function createBadges({ q, notify, nowIso }) {
       `SELECT
          (SELECT COUNT(*) FROM goals WHERE kid_id = ?) AS goals,
          (SELECT COUNT(*) FROM goals WHERE kid_id = ? AND status = 'purchased') AS bought,
-         (SELECT COALESCE(SUM(-amount_cents), 0) FROM transactions WHERE user_id = ? AND kind = 'goal_save') AS saved,
+         (SELECT COALESCE(SUM(-amount_cents), 0) FROM transactions WHERE user_id = ? AND kind IN ('goal_save', 'goal_release')) AS saved,
          (SELECT COUNT(*) FROM chore_claims WHERE kid_id = ? AND status = 'approved') AS chores,
          (SELECT COUNT(*) FROM transactions WHERE user_id = ? AND kind = 'interest_in') AS interest`,
     ).get(kidId, kidId, kidId, kidId, kidId);

@@ -140,7 +140,8 @@ function interestCard(d, refresh) {
   input.style.paddingLeft = '14px';
   const parsed = () => {
     const p = Number(String(input.value).replace(',', '.'));
-    return Number.isFinite(p) && p > 0 && p <= 20 ? Math.round(p * 100) : NaN;
+    const bps = Math.round(p * 100);
+    return Number.isFinite(p) && bps >= 1 && p <= 20 ? bps : NaN; // 0.01% is the smallest rate; anything rounding to 0 is rejected, not silently turned off
   };
   const sync = () => {
     panel.hidden = !on;

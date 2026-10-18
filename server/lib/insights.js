@@ -14,6 +14,10 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
     const since = new Date(now.getTime() - days * DAY_MS).toISOString();
     const filter = kidId ? 'AND t.user_id = ?' : '';
     const args = kidId ? [parentId, since, kidId] : [parentId, since];
+    // The weekly chart is made of whole 7-day blocks, which can reach slightly further back than the totals window.
+    const weeks = Math.max(1, Math.min(13, Math.ceil(days / 7)));
+    const weeklySince = new Date(now.getTime() - weeks * 7 * DAY_MS).toISOString();
+    const weeklyArgs = kidId ? [parentId, weeklySince, kidId] : [parentId, weeklySince];
 
     const [kids, groups, spends] = await Promise.all([
       q("SELECT id, name, avatar, color FROM users WHERE parent_id = ? AND role = 'kid' ORDER BY id").all(parentId),
@@ -27,7 +31,7 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
         `SELECT t.created_at, t.amount_cents
          FROM transactions t JOIN users u ON u.id = t.user_id
          WHERE u.parent_id = ? AND u.role = 'kid' AND t.kind IN ('spend', 'goal_purchase') AND t.created_at > ? ${filter}`,
-      ).all(...args),
+      ).all(...weeklyArgs),
     ]);
 
     const empty = () => ({ spentCents: 0, earnedCents: 0, savedCents: 0 });
@@ -59,7 +63,6 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
     }
 
     // Spending per rolling 7-day window, oldest first, so the newest bar is "the last 7 days".
-    const weeks = Math.max(1, Math.min(13, Math.ceil(days / 7)));
     const zone = kids.length ? await parentZone({ parent_id: parentId }) : 'UTC';
     const weekly = Array.from({ length: weeks }, (_, i) => {
       const end = new Date(now.getTime() - (weeks - 1 - i) * 7 * DAY_MS);
@@ -86,9 +89,10 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
 // ───────────── CSV ─────────────
 
 /** One CSV cell. Quotes when needed, and defuses spreadsheet formulas (=, +, -, @) typed into notes or names. */
-export function csvCell(value) {
+export function csvCell(value, { numeric = false } = {}) {
   let s = value === null || value === undefined ? '' : String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // A number we formatted ourselves can't be a formula, and must stay a number so the column sums in a spreadsheet.
+  if (!numeric && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -115,11 +119,8 @@ export function activityCsv(items) {
   const header = ['Date (UTC)', 'Who', 'Type', 'With', 'Amount (USD)', 'Category', 'Note'];
   const lines = [header.map(csvCell).join(',')];
   for (const t of items) {
-    lines.push(
-      [t.createdAt, t.owner?.name ?? '', KIND_LABEL[t.kind] ?? t.kind, t.counterparty ?? '', (t.amountCents / 100).toFixed(2), t.category ?? '', t.note ?? '']
-        .map(csvCell)
-        .join(','),
-    );
+    const text = [t.createdAt, t.owner?.name ?? '', KIND_LABEL[t.kind] ?? t.kind, t.counterparty ?? ''].map((v) => csvCell(v));
+    lines.push([...text, csvCell((t.amountCents / 100).toFixed(2), { numeric: true }), csvCell(t.category ?? ''), csvCell(t.note ?? '')].join(','));
   }
   return lines.join('\r\n') + '\r\n';
 }

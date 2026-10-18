@@ -15,7 +15,10 @@ before(async () => {
   H = await makeHarness();
 });
 after(() => H.close());
-beforeEach(() => H.reset());
+beforeEach(async () => {
+  H.reset();
+  for (const l of Object.values(H.app.limiters)) await l.clear(); // this file signs up lots of accounts from one address
+});
 
 // ───────────────────────── migrations ─────────────────────────
 
@@ -346,7 +349,9 @@ test('CSV export: correct columns, quoting, formula-injection defused, and acces
   assert.match(r.headers.get('content-disposition'), /attachment; filename="nestly-activity-\d{4}-\d{2}-\d{2}\.csv"/);
   const lines = r.raw.trim().split('\r\n');
   assert.equal(lines.length, 4); // header + deposit + send + spend
-  assert.ok(lines.some((l) => l.includes('-12.34') && l.includes('"Lunch, snacks"')));
+  assert.ok(lines.some((l) => l.includes(',-12.34,') && l.includes('"Lunch, snacks"')), 'outgoing amounts stay real numbers (no apostrophe)');
+  assert.ok(lines.every((l) => !/,'-\d/.test(l)), 'no amount is turned into text');
+  assert.equal(csvCell('-5.00', { numeric: true }), '-5.00');
   assert.ok(lines.some((l) => l.includes("'=1+1")), 'formula in a note is neutralised');
   assert.ok(lines.some((l) => l.includes("'=Evil Kid")), 'formula in a name is neutralised');
 
@@ -403,4 +408,88 @@ test('the early theme script is a plain classic script allowed by the CSP', asyn
   assert.match(html, /<script src="\/js\/theme-init\.js"><\/script>/);
   assert.doesNotMatch(html, /<script>[^<]/); // no inline scripts (the CSP forbids them)
   assert.equal((await fetch(H.base + '/js/theme-init.js')).status, 200);
+});
+
+// ───────────────────────── fixes from the v2 review ─────────────────────────
+
+test('insights: every weekly bar covers a full 7 days, so a steady spender gets a flat chart', async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent);
+  await H.fund(parent, 50000);
+  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 50000 });
+  // One $1 purchase every day for 41 days, today included, so every 7-day block holds exactly seven.
+  const start = H.clock().getTime();
+  for (let day = 40; day >= 0; day--) {
+    H.setNow(new Date(start - day * DAY));
+    await H.app.bank.spend(kid.id, 100, 'food', null);
+  }
+  H.setNow(new Date(start));
+  await H.relogin(parent);
+  const weekly = (await parent.c.get('/api/insights?days=30')).body.weekly.map((w) => w.spentCents);
+  assert.equal(weekly.length, 5);
+  assert.deepEqual(weekly, [700, 700, 700, 700, 700], `first bar was short before the fix: ${weekly}`);
+  const ninety = (await parent.c.get('/api/insights?days=90')).body.weekly.map((w) => w.spentCents);
+  assert.equal(ninety.at(-1), 700);
+  assert.ok(ninety.slice(-5).every((v) => v === 700));
+});
+
+test('badges: saver badges use NET savings, so moving money in and out cannot farm them', async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent);
+  await H.fund(parent, 50000);
+  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 12000 });
+  const goal = (await kid.c.post('/api/kid/goals', { name: 'Big one', emoji: '🎯', targetCents: 50000 })).body.id;
+  for (let i = 0; i < 3; i++) {
+    await kid.c.post(`/api/kid/goals/${goal}/save`, { amountCents: 6000 });
+    await kid.c.post(`/api/kid/goals/${goal}/withdraw`, { amountCents: 6000 });
+  }
+  const earned = (await kid.c.get('/api/kid/overview')).body.badges.filter((b) => b.earned).map((b) => b.key);
+  assert.ok(earned.includes('saver_25'), 'it was above $25 net at the moment of saving');
+  assert.ok(!earned.includes('saver_100'), 'but $180 gross in and out is $0 net');
+});
+
+test('a database that is already fully migrated starts with one read and never takes the write lock', async () => {
+  const file = `file:${join(mkdtempSync(join(tmpdir(), 'nestly-fast-')), 'fast.db')}`;
+  const first = new Db(createClient({ url: file }));
+  await first.ensureReady();
+  await first.close();
+
+  const client = createClient({ url: file });
+  const calls = { transaction: 0, batch: 0, executeMultiple: 0 };
+  for (const name of Object.keys(calls)) {
+    const original = client[name].bind(client);
+    client[name] = (...args) => {
+      calls[name]++;
+      return original(...args);
+    };
+  }
+  const second = new Db(client);
+  await second.ensureReady();
+  assert.deepEqual(calls, { transaction: 0, batch: 0, executeMultiple: 0 });
+  assert.equal((await second.get('SELECT COUNT(*) AS n FROM users')).n, 0); // and it works
+  await second.close();
+});
+
+test("a kid's chore list costs the same number of database calls no matter how many chores there are", async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent);
+  const count = async () => {
+    let n = 0;
+    const original = H.app.db.client.execute.bind(H.app.db.client);
+    H.app.db.client.execute = (...a) => {
+      n++;
+      return original(...a);
+    };
+    try {
+      assert.equal((await kid.c.get('/api/kid/chores')).status, 200);
+    } finally {
+      H.app.db.client.execute = original;
+    }
+    return n;
+  };
+  await parent.c.post('/api/chores', chore(kid.id, { title: 'One' }));
+  const few = await count();
+  for (let i = 0; i < 11; i++) await parent.c.post('/api/chores', chore(kid.id, { title: `Chore ${i}` }));
+  assert.equal((await kid.c.get('/api/kid/chores')).body.chores.length, 12);
+  assert.equal(await count(), few, 'no per-chore queries');
 });

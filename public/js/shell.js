@@ -228,7 +228,7 @@ export function buildKidShell(user, onLogout) {
     h(
       'header',
       { class: 'kid-top' },
-      h('div', { class: 'kid-top-in' }, avatar(user, 'sm'), h('b', { style: { fontSize: '18px' } }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
+      h('div', { class: 'kid-top-in' }, avatar(user, 'sm'), h('b', { style: { fontSize: '18px' }, title: user.name }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
     ),
     host,
   );

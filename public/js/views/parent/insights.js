@@ -64,7 +64,7 @@ export const insightsView = defineView({
             h(
               'div',
               { style: { overflowX: 'auto', padding: '0 10px 14px' } },
-              h('table', { class: 'table' }, h('thead', null, h('tr', null, ['Kid', 'Spent', 'Earned', 'Saved'].map((x) => h('th', null, x)))), h('tbody', null, d.perKid.map((k) => h('tr', null, h('td', null, h('span', { class: 'cluster', style: { gap: '8px', flexWrap: 'nowrap' } }, avatar(k.kid, 'xs'), k.kid.name)), h('td', null, money(k.spentCents)), h('td', null, money(k.earnedCents)), h('td', null, money(Math.max(0, k.savedCents))))))),
+              h('table', { class: 'table' }, h('thead', null, h('tr', null, ['Kid', 'Spent', 'Earned', 'Saved'].map((x) => h('th', null, x)))), h('tbody', null, d.perKid.map((k) => h('tr', null, h('td', null, h('span', { class: 'cluster', style: { gap: '8px', flexWrap: 'nowrap', minWidth: 0 } }, avatar(k.kid, 'xs'), h('span', { class: 'ellipsis' }, k.kid.name))), h('td', null, money(k.spentCents)), h('td', null, money(k.earnedCents)), h('td', null, money(Math.max(0, k.savedCents))))))),
             ),
           )
         : null,

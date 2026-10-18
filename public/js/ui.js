@@ -351,7 +351,11 @@ export function spendChart(days, { tipTitle, axisLabel, unit = 'spent' } = {}) {
     const pr = plot.getBoundingClientRect();
     const cr = col.getBoundingClientRect();
     const barTop = pr.height * (1 - d.spentCents / peak);
-    tip.style.left = `${cr.left - pr.left + cr.width / 2 + 38}px`;
+    // Keep the tooltip inside the chart's card so a bar near the edge can't push it off-screen and widen the page.
+    const boxWidth = plot.parentNode.getBoundingClientRect().width;
+    const half = tip.offsetWidth / 2;
+    const wanted = cr.left - pr.left + cr.width / 2 + 38;
+    tip.style.left = `${Math.min(Math.max(wanted, half + 2), Math.max(half + 2, boxWidth - half - 2))}px`;
     tip.style.top = `${Math.max(barTop, 46) - 6}px`;
     tip.classList.add('show');
   };
@@ -468,8 +472,9 @@ export function badgeShelf(badges, { compact = false } = {}) {
         { class: `badge-tile ${b.earned ? 'earned' : 'locked'}`, title: `${b.title} — ${b.text}${b.earned ? '' : ' (not yet)'}` },
         h('span', { class: 'badge-emoji', 'aria-hidden': 'true' }, b.earned ? b.emoji : '🔒'),
         h('span', { class: 'badge-title' }, b.title),
-        compact ? null : h('span', { class: 'badge-text' }, b.text),
-        h('span', { class: 'sr-only' }, b.earned ? 'Earned' : 'Not earned yet'),
+        // Locked badges always show how to earn them (touch/keyboard users have no hover tooltip).
+        compact && b.earned ? null : h('span', { class: 'badge-text' }, b.text),
+        h('span', { class: 'sr-only' }, b.earned ? ', earned' : ', not earned yet'),
       ),
     ),
   );

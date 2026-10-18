@@ -150,6 +150,14 @@ export class Db {
   }
 
   async #init() {
+    // Fast path (nearly every cold start): one plain read, no write lock. If the newest migration is already recorded
+    // the database is fully set up. The base tables are frozen — later changes always arrive as migrations.
+    try {
+      const rs = await this.client.execute('SELECT MAX(version) AS v FROM schema_migrations');
+      if ((rs.rows[0]?.v ?? 0) >= MIGRATIONS[MIGRATIONS.length - 1].version) return;
+    } catch {
+      /* no schema_migrations table yet: a new or pre-migration database — fall through to the full setup */
+    }
     // Several processes (or serverless instances) may start together on one database: be patient and jitter the retries.
     for (let attempt = 0; ; attempt++) {
       try {
