@@ -46,8 +46,6 @@ three-step setup on the home page.
   and a full activity feed per kid or for everyone.
 - **Chores that pay** — assign a chore with a reward (one-time, daily or weekly). Your kid taps *I did it!*, you approve, and
   the reward moves from your balance to theirs exactly once. Send it back with a note if it isn't done.
-- **Savings interest** — pick a yearly rate (up to 20%) and the "Bank of Mom" pays weekly interest on what a kid has saved in goals,
-  from your balance. Nothing is created out of thin air.
 - **Insights** — spending by category, week by week and per kid over 7/30/90 days; **export** all activity as a CSV.
 - **Badges** you can see on each kid's page, and **notifications** for requests, chores, purchases, goals and missed payments.
 - **Install it** on a phone or desktop as an app, and choose light, dark or match-my-device.
@@ -58,7 +56,7 @@ three-step setup on the home page.
 - **Spend** (record a purchase by category), **ask** a parent for money, and **save** toward goals
   with progress rings — hit the target and buy it, with confetti.
 - **Chores** to earn money, with a big *I did it!* button and a record of what they've earned.
-- **Badges** to collect (Goal Setter, Piggy Saver, Chore Champ…), and weekly **interest** on their savings if their parent turns it on.
+- **Badges** to collect (Goal Setter, Piggy Saver, Chore Champ…).
 - Their own notifications and activity history.
 
 ## How it works
@@ -70,7 +68,7 @@ server/
   routes.js         the JSON API
   seed.js           builds the demo family by replaying real operations on a moving clock
   lib/bank.js       the banking engine — every money movement is one SQLite transaction
-  lib/chores.js, interest.js, badges.js, insights.js   feature modules that plug into the engine
+  lib/chores.js, badges.js, insights.js   feature modules that plug into the engine
   lib/migrations.js versioned schema changes (applied once, race-safe, in one transaction)
   lib/auth.js       scrypt password hashing, sessions, login throttling
   config.js         picks the database from the environment
@@ -193,4 +191,4 @@ placeholder precisely so it can be wired up to a provider later.
 
 ## Ideas for next
 
-Chores that pay out, interest on savings, linking real cards, email/SMS alerts, and multiple parents per family.
+Linking real cards, email/SMS alerts, and multiple parents per family.

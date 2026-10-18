@@ -778,7 +778,7 @@ dialog.modal::backdrop { background: rgba(10, 12, 30, 0.5); backdrop-filter: blu
 :root[data-theme="dark"] [data-color] { --a-soft: color-mix(in srgb, var(--a-solid) 22%, var(--surface)); }
 :root[data-theme="dark"] .skeleton::after { background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.06) 50%, transparent 80%); }
 
-/* ───────── 11. v2 features: chores, interest, badges, insights ───────── */
+/* ───────── 11. v2 features: chores, badges, insights ───────── */
 :root[data-theme="dark"] { color-scheme: dark; }
 
 .badges { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
@@ -826,7 +826,6 @@ dialog.modal::backdrop { background: rgba(10, 12, 30, 0.5); backdrop-filter: blu
 
 .theme-seg button { display: inline-flex; align-items: center; gap: 6px; }
 .stats-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.interest-note { font-size: 13.5px; color: var(--text-2); display: flex; gap: 8px; align-items: center; }
 
 @media (max-width: 880px) {
   .stats-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }

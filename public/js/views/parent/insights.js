@@ -41,7 +41,7 @@ export const insightsView = defineView({
         stat('bag', 'Spent', t.spentCents, `in the last ${d.days} days`),
         stat('receive', 'Earned & received', t.earnedCents, `allowance ${money(t.allowanceCents)} · chores ${money(t.choresCents)}`),
         stat('target', 'Moved into goals', Math.max(0, t.savedCents), 'net of withdrawals'),
-        stat('trend', 'Interest earned', t.interestCents, 'paid on savings'),
+        stat('check', 'Chore rewards', t.choresCents, 'earned by doing chores'),
       ),
       empty
         ? h('div', { class: 'card' }, emptyState({ emoji: '📊', title: 'Nothing to chart yet', text: 'Once your kids start spending, saving and earning, you’ll see it here.' }))

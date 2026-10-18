@@ -15,7 +15,6 @@ import { HttpError, cents, oneOf, FREQUENCIES, CATEGORIES, money, MAX_CENTS } fr
 import { dateInZone, firstDue, advance, addDays } from './dates.js';
 import { createBadges } from './badges.js';
 import { createChores } from './chores.js';
-import { createInterest, MAX_INTEREST_BPS, ratePercent } from './interest.js';
 import { createInsights } from './insights.js';
 
 export const KID_ONLY_KINDS = ['spend', 'goal_save', 'goal_release', 'goal_purchase'];
@@ -87,8 +86,6 @@ export function createBank(db, clock = () => new Date()) {
       frozen: !!row.frozen,
       weeklyLimitCents: row.weekly_limit_cents,
       maxRequestCents: row.max_request_cents,
-      interestBps: row.interest_bps,
-      interestNext: row.interest_bps > 0 ? row.interest_next : null,
       allowance: {
         cents: row.allowance_cents,
         freq: row.allowance_freq,
@@ -133,18 +130,6 @@ export function createBank(db, clock = () => new Date()) {
             ? null
             : cents(input.maxRequestCents, { field: 'Request cap', min: 100, max: MAX_CENTS });
       }
-      if ('interestBps' in input) {
-        const bps = input.interestBps;
-        if (!Number.isInteger(bps) || bps < 0 || bps > MAX_INTEREST_BPS) {
-          throw new HttpError(400, 'invalid', `Interest must be between 0% and ${MAX_INTEREST_BPS / 100}% a year.`);
-        }
-        next.interest_bps = bps;
-        if (bps === 0) next.interest_next = null;
-        else if (!cur.interest_bps || !cur.interest_next) next.interest_next = firstDue(dateInZone(clock(), await parentZone(kid)), 'weekly', 0); // next Sunday
-        if (bps > 0 && bps !== cur.interest_bps) {
-          notes.push({ icon: '📈', title: 'Your savings now earn interest!', body: `${ratePercent(bps)} a year on what you save in goals, paid every week.` });
-        }
-      }
       if ('allowance' in input) {
         const a = input.allowance ?? {};
         const freq = oneOf(a.freq, FREQUENCIES, { field: 'Frequency' });
@@ -176,8 +161,7 @@ export function createBank(db, clock = () => new Date()) {
 
       await q(
         `UPDATE kid_controls SET frozen = ?, weekly_limit_cents = ?, max_request_cents = ?, allowance_cents = ?,
-           allowance_freq = ?, allowance_day = ?, allowance_active = ?, allowance_next = ?, allowance_fail_notified = ?,
-           interest_bps = ?, interest_next = ?
+           allowance_freq = ?, allowance_day = ?, allowance_active = ?, allowance_next = ?, allowance_fail_notified = ?
          WHERE kid_id = ?`,
       ).run(
         next.frozen,
@@ -189,8 +173,6 @@ export function createBank(db, clock = () => new Date()) {
         next.allowance_active,
         next.allowance_next,
         next.allowance_fail_notified,
-        next.interest_bps,
-        next.interest_next,
         kidId,
       );
       for (const n of notes) await notify(kidId, { ...n, link: '#/' });
@@ -796,21 +778,17 @@ export function createBank(db, clock = () => new Date()) {
   core.badges = createBadges(core);
   core.awardBadges = core.badges.awardBadges;
   core.chores = createChores(core);
-  const interest = createInterest(core);
   const insights = createInsights(core);
 
-  /** Everything that should happen "on a schedule": allowances and savings interest. */
+  /** Everything that should happen "on a schedule" (today: allowances). */
   async function runScheduled() {
-    const allowances = await runAllowances();
-    const interestPaid = await interest.runInterest();
-    return { allowances, interest: interestPaid };
+    return { allowances: await runAllowances() };
   }
 
   return {
     ...core.chores,
     ...core.badges,
     ...insights,
-    runInterest: interest.runInterest,
     runScheduled,
     atomic,
     getUser,

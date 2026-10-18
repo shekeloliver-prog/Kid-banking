@@ -37,7 +37,6 @@ const leo = await bank.createKid(parent, { name: 'Leo', username: 'leo', passwor
 await bank.addFunds(parent.id, 50000);
 await bank.updateControls(parent.id, mia, { weeklyLimitCents: 3000, allowance: { cents: 1000, freq: 'weekly', day: 5, active: true } });
 await bank.updateControls(parent.id, leo, { maxRequestCents: 2500, allowance: { cents: 1500, freq: 'monthly', day: 1, active: true } });
-await bank.updateControls(parent.id, mia, { interestBps: 500 }); // the bank pays Mia 5% a year on her savings
 
 const catChore = await bank.createChore(parent.id, mia, { title: 'Feed the cat', emoji: '🐕', rewardCents: 100, repeat: 'daily' });
 const trashChore = await bank.createChore(parent.id, mia, { title: 'Take out the trash', emoji: '🗑️', rewardCents: 300, repeat: 'weekly' });
@@ -64,7 +63,7 @@ const attempt = async (fn) => {
 
 for (let day = 0; day < 36; day++) {
   tick(9 * 3600000);
-  await bank.runScheduled(); // allowances + savings interest
+  await bank.runScheduled(); // allowances
   if (day === 12) await attempt(() => bank.addFunds(parent.id, 30000));
   if (day === 3) await attempt(() => bank.sendMoney(parent.id, mia, 2000, 'Birthday money from Grandma'));
   if (day === 9) await attempt(() => bank.sendMoney(parent.id, leo, 2000, 'Gift from Grandpa'));

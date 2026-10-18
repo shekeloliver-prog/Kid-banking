@@ -35,6 +35,8 @@ export const MIGRATIONS = [
        )`,
       `CREATE INDEX IF NOT EXISTS claims_chore ON chore_claims(chore_id, id DESC)`,
       `CREATE INDEX IF NOT EXISTS claims_kid ON chore_claims(kid_id, status)`,
+      // interest_bps / interest_next were part of a feature that was removed before release. They are unused and harmless;
+      // a migration is never edited after it may have run, so the columns stay.
       `ALTER TABLE kid_controls ADD COLUMN interest_bps INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE kid_controls ADD COLUMN interest_next TEXT`,
       `CREATE TABLE IF NOT EXISTS badges (

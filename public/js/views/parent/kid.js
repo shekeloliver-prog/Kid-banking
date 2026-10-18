@@ -3,7 +3,7 @@ import { icon } from '../../icons.js';
 import { api } from '../../api.js';
 import { defineView } from '../../view.js';
 import { avatar, pill, meter, moneyField, switchControl, activityList, spendChart, toast, banner, badgeShelf } from '../../ui.js';
-import { money, moneyCompact, weekdayName, ordinal, formatDay, describeAllowance, ymdToDate, ratePercent, weeklyInterest } from '../../format.js';
+import { money, moneyCompact, weekdayName, ordinal, formatDay, describeAllowance, ymdToDate } from '../../format.js';
 import { moneyDialog, editKidDialog, resetPinDialog, removeKidDialog, requestItem, choreClaimItem } from './parts.js';
 
 // Mirrors the server's schedule maths so the form can preview the first payment.
@@ -131,57 +131,6 @@ function limitsCard(d, refresh) {
   );
 }
 
-function interestCard(d, refresh) {
-  const kid = d.kid;
-  let on = kid.interestBps > 0;
-  const input = h('input', { class: 'input', id: 'interest-rate', type: 'text', inputmode: 'decimal', autocomplete: 'off', maxlength: 5, value: kid.interestBps ? String(kid.interestBps / 100) : '5' });
-  const preview = h('div', { class: 'interest-note' });
-  const panel = h('div', { class: 'subpanel' }, h('div', { class: 'field' }, h('label', { for: 'interest-rate' }, 'Yearly interest rate (%)'), h('div', { class: 'money-input' }, input, h('span', { class: 'cur', style: { left: 'auto', right: '14px' }, 'aria-hidden': 'true' }, '%')), h('div', { class: 'hint' }, 'Between 0.01% and 20%. Paid every Sunday from your balance.')), preview);
-  input.style.paddingLeft = '14px';
-  const parsed = () => {
-    const p = Number(String(input.value).replace(',', '.'));
-    const bps = Math.round(p * 100);
-    return Number.isFinite(p) && bps >= 1 && p <= 20 ? bps : NaN; // 0.01% is the smallest rate; anything rounding to 0 is rejected, not silently turned off
-  };
-  const sync = () => {
-    panel.hidden = !on;
-    const bps = parsed();
-    preview.replaceChildren(
-      icon('trend', 16),
-      Number.isNaN(bps)
-        ? 'Enter a rate between 0.01 and 20.'
-        : kid.savedCents > 0
-          ? `${kid.name} has ${money(kid.savedCents)} saved in goals — about ${money(weeklyInterest(kid.savedCents, bps))} a week at ${ratePercent(bps)}.`
-          : `${kid.name} hasn’t saved anything in goals yet. Interest starts once they do.`,
-    );
-  };
-  input.addEventListener('input', sync);
-  const sw = switchControl({ checked: on, label: 'Savings interest', onChange: (v) => { on = v; sync(); } });
-  sync();
-  const save = h('button', { class: 'btn btn-primary', type: 'button' }, 'Save interest');
-  save.addEventListener('click', async () => {
-    const bps = parsed();
-    if (on && Number.isNaN(bps)) return toast('Enter a rate between 0.01% and 20%.', { tone: 'error' });
-    setBusy(save, true);
-    try {
-      await api.put(`/kids/${kid.id}/controls`, { interestBps: on ? bps : 0 });
-      toast(on ? `${kid.name}'s savings now earn ${ratePercent(bps)}` : 'Interest turned off', { emoji: '📈' });
-      refresh({ silent: true });
-    } catch (e) {
-      toast(e.message, { tone: 'error' });
-    } finally {
-      setBusy(save, false);
-    }
-  });
-  return h(
-    'section',
-    { class: 'card' },
-    h('div', { class: 'control' }, h('div', null, h('b', null, 'Savings interest'), h('div', { class: 'desc' }, 'Reward saving with weekly interest on their goals.')), sw.el),
-    panel,
-    h('div', { style: { marginTop: '16px' } }, save),
-  );
-}
-
 function accountCard(d, refresh) {
   const kid = d.kid;
   const sw = switchControl({
@@ -251,7 +200,7 @@ export const kidView = defineView({
         h('a', { class: 'back-link', href: '#/kids' }, icon('left', 16), 'All kids'),
         h('div', { class: 'kid-head' },
           avatar(kid, 'xl'),
-          h('div', { class: 'grow' }, h('h1', null, kid.name), h('div', { class: 'muted' }, `@${kid.username}`), h('div', { class: 'cluster', style: { marginTop: '8px' } }, kid.frozen ? pill('Spending paused', 'warn', 'pause') : pill('Active', 'pos', 'check'), describeAllowance(kid.allowance) ? pill(`Allowance ${describeAllowance(kid.allowance)}`, 'primary', 'calendar') : null, kid.interestBps ? pill(`${ratePercent(kid.interestBps)} interest`, 'pos', 'trend') : null)),
+          h('div', { class: 'grow' }, h('h1', null, kid.name), h('div', { class: 'muted' }, `@${kid.username}`), h('div', { class: 'cluster', style: { marginTop: '8px' } }, kid.frozen ? pill('Spending paused', 'warn', 'pause') : pill('Active', 'pos', 'check'), describeAllowance(kid.allowance) ? pill(`Allowance ${describeAllowance(kid.allowance)}`, 'primary', 'calendar') : null)),
           h('div', { class: 'cluster' },
             h('button', { class: 'btn btn-accent', onClick: () => dialog('send') }, icon('send', 18), 'Send money'),
             h('button', { class: 'btn', onClick: () => dialog('take') }, icon('undo', 18), 'Take back')))),
@@ -267,7 +216,7 @@ export const kidView = defineView({
           goalsCard(d),
           h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Badges'), h('p', { class: 'card-sub' }, `${d.badges.filter((b) => b.earned).length} of ${d.badges.length} earned`))), badgeShelf(d.badges, { compact: true })),
           h('section', null, h('div', { class: 'section-head' }, h('h2', null, 'Activity'), h('a', { class: 'link', href: `#/activity?kid=${kid.id}` }, 'See all', icon('right', 16))), activityList(d.recent, 'parent', { emptyText: `Nothing yet — send ${kid.name} some money to get started.` }))),
-        h('div', { class: 'stack' }, allowanceCard(d, refresh), limitsCard(d, refresh), interestCard(d, refresh), accountCard(d, refresh))),
+        h('div', { class: 'stack' }, allowanceCard(d, refresh), limitsCard(d, refresh), accountCard(d, refresh))),
     );
   },
 });

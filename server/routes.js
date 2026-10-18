@@ -113,7 +113,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     if (!cronSecret || a.length !== b.length || !timingSafeEqual(a, b)) throw new HttpError(401, 'unauthenticated', 'Not allowed.');
     const ran = await bank.runScheduled();
     await purgeExpiredSessions(db, clock());
-    return { paid: ran.allowances.length, interest: ran.interest.length };
+    return { paid: ran.allowances.length };
   });
 
   // ───────────── auth ─────────────
@@ -256,7 +256,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
 
   put('/api/kids/:id/controls', 'parent', (ctx) => {
     const input = {};
-    for (const key of ['frozen', 'weeklyLimitCents', 'maxRequestCents', 'allowance', 'interestBps']) if (key in ctx.body) input[key] = ctx.body[key];
+    for (const key of ['frozen', 'weeklyLimitCents', 'maxRequestCents', 'allowance']) if (key in ctx.body) input[key] = ctx.body[key];
     return bank.updateControls(ctx.user.id, id(ctx.params.id), input);
   });
 

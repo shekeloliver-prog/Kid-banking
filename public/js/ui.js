@@ -263,10 +263,6 @@ export function describeTx(tx, view) {
       return { icon: 'check', tone: 'info', title: `Chore reward to ${cp}`, sub: tx.note };
     case 'chore_in':
       return { icon: 'check', tone: 'pos', title: 'Chore reward', sub: tx.note ?? `From ${cp}` };
-    case 'interest_out':
-      return { icon: 'trend', tone: 'info', title: `Interest paid to ${cp}`, sub: tx.note };
-    case 'interest_in':
-      return { icon: 'trend', tone: 'pos', title: 'Interest on savings', sub: tx.note };
     default:
       return { icon: 'list', tone: '', title: tx.kind, sub: tx.note };
   }

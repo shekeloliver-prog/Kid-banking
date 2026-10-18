@@ -8,7 +8,6 @@ export const BADGES = [
   { key: 'goal_getter', emoji: '🏆', title: 'Goal Getter', text: 'Saved up for a goal and bought it' },
   { key: 'helper', emoji: '🧹', title: 'Helping Hand', text: 'Finished a first chore' },
   { key: 'chore_10', emoji: '🌟', title: 'Chore Champ', text: 'Finished 10 chores' },
-  { key: 'interest', emoji: '📈', title: 'Interest Earner', text: 'Earned interest on savings' },
 ];
 
 const RULES = {
@@ -18,7 +17,6 @@ const RULES = {
   goal_getter: (s) => s.bought >= 1,
   helper: (s) => s.chores >= 1,
   chore_10: (s) => s.chores >= 10,
-  interest: (s) => s.interest >= 1,
 };
 
 export function createBadges({ q, notify, nowIso }) {
@@ -28,9 +26,8 @@ export function createBadges({ q, notify, nowIso }) {
          (SELECT COUNT(*) FROM goals WHERE kid_id = ?) AS goals,
          (SELECT COUNT(*) FROM goals WHERE kid_id = ? AND status = 'purchased') AS bought,
          (SELECT COALESCE(SUM(-amount_cents), 0) FROM transactions WHERE user_id = ? AND kind IN ('goal_save', 'goal_release')) AS saved,
-         (SELECT COUNT(*) FROM chore_claims WHERE kid_id = ? AND status = 'approved') AS chores,
-         (SELECT COUNT(*) FROM transactions WHERE user_id = ? AND kind = 'interest_in') AS interest`,
-    ).get(kidId, kidId, kidId, kidId, kidId);
+         (SELECT COUNT(*) FROM chore_claims WHERE kid_id = ? AND status = 'approved') AS chores`,
+    ).get(kidId, kidId, kidId, kidId);
   }
 
   /** Awards anything newly earned and tells the kid. Call inside the transaction that caused it. */

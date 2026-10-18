@@ -5,7 +5,7 @@ import { dateInZone, addDays } from './dates.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const INSIGHT_RANGES = [7, 30, 90];
 
-const EARNED_KINDS = ['receive', 'allowance_in', 'chore_in', 'interest_in'];
+const EARNED_KINDS = ['receive', 'allowance_in', 'chore_in'];
 
 export function createInsights({ q, clock, parentZone, ownKid }) {
   async function insights(parentId, { days = 30, kidId = null } = {}) {
@@ -36,7 +36,7 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
 
     const empty = () => ({ spentCents: 0, earnedCents: 0, savedCents: 0 });
     const perKid = new Map(kids.map((k) => [k.id, { kid: k, ...empty() }]));
-    const totals = { spentCents: 0, earnedCents: 0, savedCents: 0, interestCents: 0, choresCents: 0, allowanceCents: 0, giftsCents: 0 };
+    const totals = { spentCents: 0, earnedCents: 0, savedCents: 0, choresCents: 0, allowanceCents: 0, giftsCents: 0 };
     const categories = new Map();
 
     for (const g of groups) {
@@ -51,7 +51,6 @@ export function createInsights({ q, clock, parentZone, ownKid }) {
       } else if (EARNED_KINDS.includes(g.kind)) {
         totals.earnedCents += g.total;
         bucket.earnedCents += g.total;
-        if (g.kind === 'interest_in') totals.interestCents += g.total;
         if (g.kind === 'chore_in') totals.choresCents += g.total;
         if (g.kind === 'allowance_in') totals.allowanceCents += g.total;
         if (g.kind === 'receive') totals.giftsCents += g.total;
@@ -111,8 +110,6 @@ const KIND_LABEL = {
   goal_purchase: 'Goal purchase',
   chore_out: 'Chore reward paid',
   chore_in: 'Chore reward earned',
-  interest_out: 'Interest paid',
-  interest_in: 'Interest earned',
 };
 
 export function activityCsv(items) {

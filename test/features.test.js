@@ -7,7 +7,6 @@ import { createClient } from '@libsql/client';
 import { Db, SCHEMA } from '../server/lib/db.js';
 import { createApp } from '../server/app.js';
 import { activityCsv, csvCell } from '../server/lib/insights.js';
-import { weeklyInterestCents, ratePercent } from '../server/lib/interest.js';
 import { makeHarness, Client, DAY } from './helpers.js';
 
 let H;
@@ -178,75 +177,9 @@ test('daily and weekly chores have a cooldown; removing a chore closes pending c
   await H.assertLedgerBalanced();
 });
 
-// ───────────────────────── interest ─────────────────────────
+// ───────────────────────── scheduled payments across instances ─────────────────────────
 
-test('interest maths and formatting', () => {
-  assert.equal(weeklyInterestCents(10000, 520), 10); // $100 at 5.2% → ~10¢ a week
-  assert.equal(weeklyInterestCents(100, 500), 0); // too small to round up to a cent
-  assert.equal(weeklyInterestCents(1_000_000, 2000), 3846);
-  assert.equal(ratePercent(500), '5%');
-  assert.equal(ratePercent(525), '5.25%');
-  assert.equal(ratePercent(550), '5.5%');
-});
-
-async function kidWithSavings(parentCents = 5000, saved = 10000, bps = 520) {
-  const parent = await H.newParent();
-  const kid = await H.newKid(parent);
-  await H.fund(parent, 50000);
-  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: saved });
-  const goal = (await kid.c.post('/api/kid/goals', { name: 'Bike', emoji: '🚲', targetCents: 50000 })).body.id;
-  await kid.c.post(`/api/kid/goals/${goal}/save`, { amountCents: saved });
-  const set = await parent.c.put(`/api/kids/${kid.id}/controls`, { interestBps: bps });
-  void parentCents;
-  return { parent, kid, set };
-}
-
-test('interest: validated, scheduled for the next Sunday, paid weekly from the parent, never twice', async () => {
-  const { parent, kid, set } = await kidWithSavings();
-  assert.equal(set.status, 200);
-  assert.equal(set.body.interestBps, 520);
-  assert.equal(set.body.interestNext, '2026-10-18'); // today is Sunday 11th → the next Sunday
-  for (const bad of [-1, 2001, 1.5, '5', null]) assert.equal((await parent.c.put(`/api/kids/${kid.id}/controls`, { interestBps: bad })).status, 400, String(bad));
-
-  const parentBefore = (await parent.c.get('/api/parent/overview')).body.balanceCents;
-  const idsOf = async () => (await H.app.bank.runScheduled()).interest.filter((p) => p.kidId === kid.id);
-  assert.equal((await idsOf()).length, 0); // not Sunday yet
-  H.advance(7 * DAY);
-  assert.equal((await idsOf()).length, 1);
-  assert.equal((await idsOf()).length, 0); // already paid this week
-  await H.relogin(kid, parent);
-  assert.equal((await parent.c.get('/api/parent/overview')).body.balanceCents, parentBefore - 10);
-  const view = (await kid.c.get('/api/kid/overview')).body;
-  assert.equal(view.kid.balanceCents, 10);
-  assert.equal(view.kid.interestNext, '2026-10-25');
-  assert.ok(view.badges.find((b) => b.key === 'interest').earned);
-  await H.assertLedgerBalanced();
-});
-
-test('interest: parent too low on funds → not paid, parent told, schedule moves on; zero savings pays nothing', async () => {
-  const parent = await H.newParent();
-  const kid = await H.newKid(parent);
-  await H.fund(parent, 10000);
-  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 10000 }); // parent now has $0
-  const goal = (await kid.c.post('/api/kid/goals', { name: 'Bike', emoji: '🚲', targetCents: 50000 })).body.id;
-  await kid.c.post(`/api/kid/goals/${goal}/save`, { amountCents: 10000 });
-  await parent.c.put(`/api/kids/${kid.id}/controls`, { interestBps: 2000 });
-  H.advance(8 * DAY);
-  const paid = (await H.app.bank.runScheduled()).interest.filter((p) => p.kidId === kid.id);
-  assert.equal(paid.length, 0);
-  await H.relogin(parent);
-  const titles = (await parent.c.get('/api/notifications')).body.items.map((n) => n.title).join('|');
-  assert.match(titles, /interest wasn't paid/);
-  assert.equal((await H.app.db.get('SELECT interest_next FROM kid_controls WHERE kid_id = ?', [kid.id])).interest_next, '2026-10-25');
-
-  const empty = await H.newKid(parent, 'Empty');
-  await parent.c.put(`/api/kids/${empty.id}/controls`, { interestBps: 1000 });
-  H.advance(8 * DAY);
-  assert.equal((await H.app.bank.runScheduled()).interest.filter((p) => p.kidId === empty.id).length, 0);
-  await H.assertLedgerBalanced();
-});
-
-test('interest: two app instances on one database racing never pay the same week twice', async () => {
+test('allowance: two app instances racing on one database never pay the same period twice', async () => {
   const file = `file:${join(mkdtempSync(join(tmpdir(), 'nestly-two-')), 'two.db')}`;
   const one = await makeHarness({ dbUrl: file });
   const two = createApp({ dbUrl: file, clock: one.clock });
@@ -254,22 +187,27 @@ test('interest: two app instances on one database racing never pay the same week
     const parent = await one.newParent();
     const kid = await one.newKid(parent);
     await one.fund(parent, 50000);
-    await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 10000 });
-    const goal = (await kid.c.post('/api/kid/goals', { name: 'Bike', emoji: '🚲', targetCents: 50000 })).body.id;
-    await kid.c.post(`/api/kid/goals/${goal}/save`, { amountCents: 10000 });
-    await parent.c.put(`/api/kids/${kid.id}/controls`, { interestBps: 520 });
     await parent.c.put(`/api/kids/${kid.id}/controls`, { allowance: { cents: 500, freq: 'weekly', day: 0, active: true } });
     one.advance(8 * DAY);
     const runs = await Promise.all([one.app.bank.runScheduled(), two.bank.runScheduled(), one.app.bank.runScheduled(), two.bank.runScheduled()]);
-    const interest = runs.flatMap((r) => r.interest).filter((p) => p.kidId === kid.id);
     const allowance = runs.flatMap((r) => r.allowances).filter((p) => p.kidId === kid.id);
-    assert.equal(interest.length, 1, 'interest paid exactly once');
     assert.equal(allowance.length, 1, 'allowance paid exactly once');
     await one.assertLedgerBalanced();
   } finally {
     await two.close();
     await one.close();
   }
+});
+
+test('there is no interest feature: the old setting is rejected as unknown and nothing pays interest', async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent);
+  const r = await parent.c.put(`/api/kids/${kid.id}/controls`, { interestBps: 500 });
+  assert.equal(r.status, 200); // unknown keys are simply ignored…
+  assert.equal(r.body.interestBps, undefined); // …and never appear in the kid's controls
+  const view = (await parent.c.get(`/api/kids/${kid.id}`)).body;
+  assert.equal(view.kid.interestBps, undefined);
+  assert.equal(view.badges.some((b) => b.key === 'interest'), false);
 });
 
 // ───────────────────────── badges ─────────────────────────
@@ -292,7 +230,7 @@ test('badges unlock from real actions, once, and show on both the kid and parent
   const titles = (await kid.c.get('/api/notifications')).body.items.map((n) => n.title).filter((t) => t.startsWith('New badge'));
   assert.equal(new Set(titles).size, titles.length, 'no badge is announced twice');
   const asParent = (await parent.c.get(`/api/kids/${kid.id}`)).body.badges;
-  assert.equal(asParent.length, 7);
+  assert.equal(asParent.length, 6);
   assert.equal(asParent.filter((b) => b.earned).length, (await earned()).length);
 });
 
