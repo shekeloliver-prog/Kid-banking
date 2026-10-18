@@ -87,6 +87,16 @@ export const CATEGORY = {
   other: { emoji: '✨', label: 'Other' },
 };
 
+// Spending breakdowns also include goal purchases, which aren't a category kids can pick.
+export const CATEGORY_LABEL = { ...CATEGORY, goals: { emoji: '🎯', label: 'Savings goals' } };
+export const CHORE_EMOJI = ['🧹', '🍽️', '🗑️', '🛏️', '🐕', '🌱', '🚗', '📚', '👕', '🧺', '🪥', '🧽'];
+export const REPEAT_LABEL = { once: 'One time', daily: 'Every day', weekly: 'Every week' };
+
+/** 520 → "5.2%" */
+export const ratePercent = (bps) => `${(bps / 100).toFixed(bps % 100 === 0 ? 0 : 2).replace(/(\.\d)0$/, '$1')}%`;
+/** What a year of interest at this rate adds per week on a given amount. */
+export const weeklyInterest = (savedCents, bps) => Math.floor((savedCents * bps) / 10000 / 52);
+
 export const AVATARS = ['🦊', '🐼', '🐸', '🦄', '🐯', '🐙', '🦁', '🐧', '🐨', '🐶', '🐱', '🦖', '🚀', '⚽', '🎨', '🎮'];
 export const COLORS = ['violet', 'blue', 'teal', 'green', 'amber', 'orange', 'pink', 'red'];
 export const GOAL_EMOJI = ['🎯', '🚲', '🎮', '🧸', '📱', '🎧', '👟', '🎸', '⚽', '🎨', '🚀', '📚', '🎁', '🏕️', '🛹', '🐶'];

@@ -37,6 +37,17 @@ const leo = await bank.createKid(parent, { name: 'Leo', username: 'leo', passwor
 await bank.addFunds(parent.id, 50000);
 await bank.updateControls(parent.id, mia, { weeklyLimitCents: 3000, allowance: { cents: 1000, freq: 'weekly', day: 5, active: true } });
 await bank.updateControls(parent.id, leo, { maxRequestCents: 2500, allowance: { cents: 1500, freq: 'monthly', day: 1, active: true } });
+await bank.updateControls(parent.id, mia, { interestBps: 500 }); // the bank pays Mia 5% a year on her savings
+
+const catChore = await bank.createChore(parent.id, mia, { title: 'Feed the cat', emoji: '🐕', rewardCents: 100, repeat: 'daily' });
+const trashChore = await bank.createChore(parent.id, mia, { title: 'Take out the trash', emoji: '🗑️', rewardCents: 300, repeat: 'weekly' });
+const lawnChore = await bank.createChore(parent.id, leo, { title: 'Mow the lawn', emoji: '🌱', rewardCents: 800, repeat: 'weekly' });
+const roomChore = await bank.createChore(parent.id, leo, { title: 'Clean your room', emoji: '🛏️', rewardCents: 500, repeat: 'once' });
+await bank.createChore(parent.id, leo, { title: 'Wash the car', emoji: '🚗', rewardCents: 600, repeat: 'once' });
+const doChore = async (kidId, choreId) => {
+  const claimId = await bank.claimChore(kidId, choreId);
+  await bank.decideClaim(parent.id, claimId, true, null);
+};
 
 const miaGoal = await bank.createGoal(mia, { name: 'New scooter', emoji: '🛹', targetCents: 6000 });
 const miaGoal2 = await bank.createGoal(mia, { name: 'Art supplies', emoji: '🎨', targetCents: 2500 });
@@ -53,7 +64,7 @@ const attempt = async (fn) => {
 
 for (let day = 0; day < 36; day++) {
   tick(9 * 3600000);
-  await bank.runAllowances();
+  await bank.runScheduled(); // allowances + savings interest
   if (day === 12) await attempt(() => bank.addFunds(parent.id, 30000));
   if (day === 3) await attempt(() => bank.sendMoney(parent.id, mia, 2000, 'Birthday money from Grandma'));
   if (day === 9) await attempt(() => bank.sendMoney(parent.id, leo, 2000, 'Gift from Grandpa'));
@@ -69,6 +80,10 @@ for (let day = 0; day < 36; day++) {
     await attempt(() => bank.saveToGoal(leo, leoGoal, 700));
   }
   if (day === 18) await attempt(() => bank.saveToGoal(mia, miaGoal2, 1000));
+  if (day % 3 === 1) await attempt(() => doChore(mia, catChore));
+  if (day % 7 === 2) await attempt(() => doChore(mia, trashChore));
+  if (day % 7 === 4) await attempt(() => doChore(leo, lawnChore));
+  if (day === 20) await attempt(() => doChore(leo, roomChore));
   tick(11 * 3600000);
 }
 
@@ -77,6 +92,8 @@ clockMs = realNow - 3 * 3600000;
 await bank.createRequest(mia, 1200, 'Movie with Priya on Saturday');
 clockMs = realNow - 45 * 60000;
 await bank.createRequest(leo, 800, 'New pack of trading cards');
+await bank.claimChore(mia, catChore).catch(() => {});
+await bank.claimChore(leo, lawnChore).catch(() => {});
 
 console.log('Demo family ready → data/demo.db');
 await db.close();

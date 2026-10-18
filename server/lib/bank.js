@@ -717,13 +717,14 @@ export function createBank(db, clock = () => new Date()) {
     const buckets = new Map();
     for (let i = days - 1; i >= 0; i--) buckets.set(addDays(today, -i), 0);
     const since = new Date(clock().getTime() - (days + 1) * DAY_MS).toISOString();
-    const [spends, summary, goals, recent, requests, badges] = await Promise.all([
+    const [spends, summary, goals, recent, requests, badges, allPendingChores] = await Promise.all([
       q("SELECT amount_cents, created_at FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?").all(kidId, since),
       kidSummary(kid),
       goalsFor(kidId),
       familyActivity(parentId, { kidId, limit: 10 }),
       requestsForKid(kidId, 5),
       core.badges.badgesFor(kidId),
+      core.chores.pendingClaimsForParent(parentId, 100),
     ]);
     for (const r of spends) {
       const d = dateInZone(new Date(r.created_at), zone);
@@ -736,6 +737,7 @@ export function createBank(db, clock = () => new Date()) {
       recent: recent.items,
       requests,
       badges,
+      pendingChores: allPendingChores.filter((c) => c.kid.id === kidId),
       today,
     };
   }

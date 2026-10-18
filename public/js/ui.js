@@ -1,6 +1,6 @@
 import { h, setBusy } from './dom.js';
 import { icon } from './icons.js';
-import { money, parseMoney, dayLabel, timeOnly, CATEGORY, moneyCompact, formatDay } from './format.js';
+import { money, parseMoney, dayLabel, timeOnly, CATEGORY, CATEGORY_LABEL, moneyCompact, formatDay } from './format.js';
 
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -259,6 +259,14 @@ export function describeTx(tx, view) {
       return { icon: 'target', tone: 'warn', title: view === 'parent' ? `${who} took money out of “${goalName}”` : `Took out of “${goalName}”`, sub: null, neutral: true };
     case 'goal_purchase':
       return { icon: 'gift', tone: 'neg', title: view === 'parent' ? `${who} bought “${goalName}”` : `Bought “${goalName}”`, sub: '🎉 Goal reached' };
+    case 'chore_out':
+      return { icon: 'check', tone: 'info', title: `Chore reward to ${cp}`, sub: tx.note };
+    case 'chore_in':
+      return { icon: 'check', tone: 'pos', title: 'Chore reward', sub: tx.note ?? `From ${cp}` };
+    case 'interest_out':
+      return { icon: 'trend', tone: 'info', title: `Interest paid to ${cp}`, sub: tx.note };
+    case 'interest_in':
+      return { icon: 'trend', tone: 'pos', title: 'Interest on savings', sub: tx.note };
     default:
       return { icon: 'list', tone: '', title: tx.kind, sub: tx.note };
   }
@@ -328,7 +336,9 @@ const niceMax = (v) => {
 const tick = (c) => (c === 0 ? '$0' : c >= 100000 ? `$${c / 100000}K` : c % 100 ? `$${(c / 100).toFixed(2)}` : `$${c / 100}`);
 
 /** Spending by day: HTML columns so labels, hover and keyboard focus all just work. */
-export function spendChart(days) {
+export function spendChart(days, { tipTitle, axisLabel, unit = 'spent' } = {}) {
+  tipTitle ??= (d) => formatDay(d.date, { weekday: 'long', month: 'short', day: 'numeric' });
+  axisLabel ??= (d) => formatDay(d.date, { month: 'numeric', day: 'numeric' });
   const peak = niceMax(Math.max(...days.map((d) => d.spentCents)));
   const root = h('div', { class: 'chart' });
   const plot = h('div', { class: 'chart-plot' });
@@ -337,7 +347,7 @@ export function spendChart(days) {
   const tip = h('div', { class: 'chart-tip', 'aria-hidden': 'true' });
   const cols = h('div', { class: 'chart-cols', style: { '--n': days.length } });
   const show = (col, d) => {
-    tip.replaceChildren(h('b', null, money(d.spentCents)), h('span', null, formatDay(d.date, { weekday: 'long', month: 'short', day: 'numeric' })));
+    tip.replaceChildren(h('b', null, money(d.spentCents)), h('span', null, tipTitle(d)));
     const pr = plot.getBoundingClientRect();
     const cr = col.getBoundingClientRect();
     const barTop = pr.height * (1 - d.spentCents / peak);
@@ -350,7 +360,7 @@ export function spendChart(days) {
     const col = h('button', {
       type: 'button',
       class: `chart-col ${d.spentCents ? '' : 'zero'}`,
-      'aria-label': `${formatDay(d.date, { weekday: 'long', month: 'long', day: 'numeric' })}: ${money(d.spentCents)} spent`,
+      'aria-label': `${tipTitle(d)}: ${money(d.spentCents)} ${unit}`,
     }, h('div', { class: 'bar', style: { '--h': d.spentCents / peak, '--i': i } }));
     col.addEventListener('pointerenter', () => show(col, d));
     col.addEventListener('focus', () => show(col, d));
@@ -359,12 +369,12 @@ export function spendChart(days) {
     cols.appendChild(col);
   });
   plot.append(grid, cols);
-  const axis = h('div', { class: 'chart-x', style: { '--n': days.length } }, days.map((d, i) => h('span', null, i % 2 === (days.length - 1) % 2 ? formatDay(d.date, { month: 'numeric', day: 'numeric' }) : '')));
+  const axis = h('div', { class: 'chart-x', style: { '--n': days.length } }, days.map((d, i) => h('span', null, i % 2 === (days.length - 1) % 2 || days.length <= 7 ? axisLabel(d) : '')));
   const table = h(
     'details',
     { class: 'chart-table' },
     h('summary', null, 'View as table'),
-    h('table', null, h('thead', null, h('tr', null, h('th', null, 'Day'), h('th', null, 'Spent'))), h('tbody', null, days.slice().reverse().map((d) => h('tr', null, h('td', null, formatDay(d.date)), h('td', null, money(d.spentCents)))))),
+    h('table', null, h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Spent'))), h('tbody', null, days.slice().reverse().map((d) => h('tr', null, h('td', null, tipTitle(d)), h('td', null, money(d.spentCents)))))),
   );
   root.append(h('div', { style: { position: 'relative' } }, plot, tip), axis, table);
   return root;
@@ -428,4 +438,39 @@ export function confetti() {
     else canvas.remove();
   };
   requestAnimationFrame(frame);
+}
+
+/** Horizontal bars for "where the money goes". One hue, sorted, direct value labels, table view for screen readers. */
+export function categoryBars(categories) {
+  const max = Math.max(1, ...categories.map((c) => c.spentCents));
+  const total = categories.reduce((s, c) => s + c.spentCents, 0);
+  const rows = categories.map((c) => {
+    const meta = CATEGORY_LABEL[c.category] ?? CATEGORY_LABEL.other;
+    return h(
+      'li',
+      { class: 'hbar-row' },
+      h('span', { class: 'hbar-label' }, h('span', { 'aria-hidden': 'true' }, meta.emoji), meta.label),
+      h('span', { class: 'hbar-track', role: 'img', 'aria-label': `${meta.label}: ${money(c.spentCents)}, ${Math.round((c.spentCents / total) * 100)} percent` }, h('span', { class: 'hbar-fill', style: { '--w': c.spentCents / max } })),
+      h('span', { class: 'hbar-value' }, money(c.spentCents)),
+    );
+  });
+  return h('div', null, h('ul', { class: 'hbars' }, rows));
+}
+
+/** The kid's badge shelf: earned ones in colour, the rest ghosted so there's something to aim for. */
+export function badgeShelf(badges, { compact = false } = {}) {
+  return h(
+    'ul',
+    { class: `badges ${compact ? 'compact' : ''}`, 'aria-label': 'Badges' },
+    badges.map((b) =>
+      h(
+        'li',
+        { class: `badge-tile ${b.earned ? 'earned' : 'locked'}`, title: `${b.title} — ${b.text}${b.earned ? '' : ' (not yet)'}` },
+        h('span', { class: 'badge-emoji', 'aria-hidden': 'true' }, b.earned ? b.emoji : '🔒'),
+        h('span', { class: 'badge-title' }, b.title),
+        compact ? null : h('span', { class: 'badge-text' }, b.text),
+        h('span', { class: 'sr-only' }, b.earned ? 'Earned' : 'Not earned yet'),
+      ),
+    ),
+  );
 }

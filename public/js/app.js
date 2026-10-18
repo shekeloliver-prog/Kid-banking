@@ -3,6 +3,7 @@ import { api } from './api.js';
 import { state, setCounts, buildParentShell, buildKidShell } from './shell.js';
 import { renderAuth } from './views/auth.js';
 import { toast } from './ui.js';
+import { applyTheme } from './theme.js';
 import { parentRoutes } from './views/parent/index.js';
 import { kidRoutes } from './views/kid/index.js';
 
@@ -84,6 +85,13 @@ function startPolling() {
 }
 function stopPolling() {
   clearInterval(pollTimer);
+}
+
+applyTheme();
+
+// Installable + offline-friendly: the worker only handles the app's own files, never /api (see public/sw.js).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
 
 window.addEventListener('hashchange', navigate);

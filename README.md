@@ -44,13 +44,21 @@ three-step setup on the home page.
   and a one-switch **pause spending** that still lets them save and ask.
 - **Approve or decline requests** (with an optional note), see a 14-day spending chart, savings goals
   and a full activity feed per kid or for everyone.
-- **Notifications** for requests, purchases, goals reached and missed allowances.
+- **Chores that pay** — assign a chore with a reward (one-time, daily or weekly). Your kid taps *I did it!*, you approve, and
+  the reward moves from your balance to theirs exactly once. Send it back with a note if it isn't done.
+- **Savings interest** — pick a yearly rate (up to 20%) and the "Bank of Mom" pays weekly interest on what a kid has saved in goals,
+  from your balance. Nothing is created out of thin air.
+- **Insights** — spending by category, week by week and per kid over 7/30/90 days; **export** all activity as a CSV.
+- **Badges** you can see on each kid's page, and **notifications** for requests, chores, purchases, goals and missed payments.
+- **Install it** on a phone or desktop as an app, and choose light, dark or match-my-device.
 
 ## What kids can do
 
 - See their balance, upcoming allowance and how much they can still spend this week.
 - **Spend** (record a purchase by category), **ask** a parent for money, and **save** toward goals
   with progress rings — hit the target and buy it, with confetti.
+- **Chores** to earn money, with a big *I did it!* button and a record of what they've earned.
+- **Badges** to collect (Goal Setter, Piggy Saver, Chore Champ…), and weekly **interest** on their savings if their parent turns it on.
 - Their own notifications and activity history.
 
 ## How it works
@@ -62,6 +70,8 @@ server/
   routes.js         the JSON API
   seed.js           builds the demo family by replaying real operations on a moving clock
   lib/bank.js       the banking engine — every money movement is one SQLite transaction
+  lib/chores.js, interest.js, badges.js, insights.js   feature modules that plug into the engine
+  lib/migrations.js versioned schema changes (applied once, race-safe, in one transaction)
   lib/auth.js       scrypt password hashing, sessions, login throttling
   config.js         picks the database from the environment
   lib/db.js         schema + one async interface over libSQL (local file or hosted Turso)
@@ -69,7 +79,7 @@ api/index.js        Vercel serverless entry (same app, no server process)
 vercel.json         Vercel config: /api rewrite, security headers, daily allowance cron
 render.yaml         Render blueprint (free plan + Turso)
 public/             the single-page app: vanilla ES modules + one stylesheet, no build step
-test/api.test.js    API tests (npm test)
+test/*.test.js      API + feature tests (npm test); test/helpers.js is the shared harness
 ```
 
 **Money safety**
@@ -162,6 +172,12 @@ still due, so it can never pay twice.
   doesn't depend on the client IP at all.
 - Prefer a server with a disk (Railway, Fly.io, a VPS)? Skip Turso: leave `TURSO_*` unset, mount a volume, and set
   `DB_PATH` to a file on it.
+
+## Upgrading a live database
+
+Schema changes live in `server/lib/migrations.js` as numbered steps. On startup each one runs at most once per database, inside a
+single write transaction that also records it in `schema_migrations`, so two instances starting at the same time can't both apply it.
+Existing accounts, balances and history are never reset. To change the schema, append a new entry — never edit an old one.
 
 ## Tests
 

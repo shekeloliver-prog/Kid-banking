@@ -3,6 +3,7 @@ import { icon, logo } from './icons.js';
 import { api } from './api.js';
 import { avatar, toast, formModal, passwordField } from './ui.js';
 import { timeAgo } from './format.js';
+import { getTheme, setTheme, THEMES } from './theme.js';
 
 export const state = { user: null, unread: 0, pending: 0, listeners: new Set() };
 export const onState = (fn) => {
@@ -114,6 +115,20 @@ function changePasswordDialog(user) {
 }
 export { changePasswordDialog };
 
+const THEME_LABEL = { system: 'Match my device', light: 'Light', dark: 'Dark' };
+function themeMenuItem() {
+  const label = h('span', null);
+  const btn = h('button', { role: 'menuitem', type: 'button' }, icon('moon', 18), h('span', { class: 'grow' }, 'Appearance'), label);
+  const sync = () => (label.textContent = THEME_LABEL[getTheme()]);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation(); // stay open so the change is visible
+    setTheme(THEMES[(THEMES.indexOf(getTheme()) + 1) % THEMES.length]);
+    sync();
+  });
+  sync();
+  return btn;
+}
+
 function userMenu(user, onLogout) {
   const btn = h('button', { class: 'icon-btn user-btn', type: 'button', 'aria-label': 'Account menu', style: { padding: '0', border: '0', background: 'none' } }, avatar(user.role === 'kid' ? user : { ...user, avatar: user.name.trim()[0]?.toUpperCase() ?? '?', color: 'violet' }, 'sm'));
   return dropdown(btn, (close) =>
@@ -123,6 +138,7 @@ function userMenu(user, onLogout) {
       h('div', { class: 'menu-label' }, user.role === 'kid' ? `@${user.username}` : user.email),
       user.role === 'parent' ? h('button', { role: 'menuitem', onClick: () => { close(); location.hash = '#/settings'; } }, icon('sliders', 18), 'Settings') : null,
       user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); changePasswordDialog(user); } }, icon('key', 18), 'Change my PIN') : null,
+      themeMenuItem(),
       h('button', { role: 'menuitem', onClick: onLogout }, icon('logout', 18), 'Log out'),
     ),
   );
@@ -130,22 +146,26 @@ function userMenu(user, onLogout) {
 
 // ───────────── shells ─────────────
 const PARENT_NAV = [
-  { href: '#/', label: 'Home', icon: 'home', match: (p) => p === '/' },
-  { href: '#/kids', label: 'Kids', icon: 'users', match: (p) => p.startsWith('/kids') },
-  { href: '#/requests', label: 'Requests', icon: 'inbox', match: (p) => p === '/requests', badge: true },
+  { href: '#/', label: 'Home', icon: 'home', match: (p) => p === '/', tab: true },
+  { href: '#/kids', label: 'Kids', icon: 'users', match: (p) => p.startsWith('/kids'), tab: true },
+  { href: '#/chores', label: 'Chores', icon: 'check', match: (p) => p === '/chores', tab: true },
+  { href: '#/requests', label: 'Requests', icon: 'inbox', match: (p) => p === '/requests', badge: true, tab: true },
   { href: '#/activity', label: 'Activity', icon: 'list', match: (p) => p === '/activity' },
+  { href: '#/insights', label: 'Insights', icon: 'trend', match: (p) => p === '/insights' },
   { href: '#/funding', label: 'Funding', icon: 'wallet', match: (p) => p === '/funding' },
-  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === '/settings', desktopOnly: true },
+  { href: '#/settings', label: 'Settings', icon: 'sliders', match: (p) => p === '/settings' },
 ];
+// Phones only have room for five tabs; everything else lives behind "More".
+const MORE_TAB = { href: '#/more', label: 'More', icon: 'more', match: (p) => ['/more', '/activity', '/insights', '/funding', '/settings'].includes(p) };
 
 export function buildParentShell(user, onLogout) {
   const host = h('main', { class: 'main', id: 'view', tabindex: '-1' });
   const links = PARENT_NAV.map((n) => {
     const badge = n.badge ? h('span', { class: 'badge', hidden: true }) : null;
-    const a = h('a', { href: n.href, class: n.desktopOnly ? 'desktop-only' : '' }, icon(n.icon, 21), h('span', null, n.label), badge);
+    const a = h('a', { href: n.href }, icon(n.icon, 21), h('span', null, n.label), badge);
     return { n, a, badge };
   });
-  const tabLinks = PARENT_NAV.filter((n) => !n.desktopOnly).map((n) => {
+  const tabLinks = [...PARENT_NAV.filter((n) => n.tab), MORE_TAB].map((n) => {
     const badge = n.badge ? h('span', { class: 'badge', hidden: true }) : null;
     return { n, a: h('a', { href: n.href }, icon(n.icon, 22), h('span', null, n.label), badge), badge };
   });
@@ -194,6 +214,7 @@ export function buildParentShell(user, onLogout) {
 const KID_NAV = [
   { href: '#/', label: 'Home', icon: 'home', match: (p) => p === '/' },
   { href: '#/goals', label: 'Goals', icon: 'target', match: (p) => p === '/goals' },
+  { href: '#/chores', label: 'Chores', icon: 'check', match: (p) => p === '/chores' },
   { href: '#/activity', label: 'Activity', icon: 'list', match: (p) => p === '/activity' },
   { href: '#/ask', label: 'Ask', icon: 'hand', match: (p) => p === '/ask' },
 ];

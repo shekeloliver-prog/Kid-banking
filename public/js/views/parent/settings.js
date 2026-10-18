@@ -4,6 +4,18 @@ import { api } from '../../api.js';
 import { defineView } from '../../view.js';
 import { state, changePasswordDialog } from '../../shell.js';
 import { toast, textField } from '../../ui.js';
+import { getTheme, setTheme, THEMES } from '../../theme.js';
+
+const THEME_UI = { system: ['Auto', 'sparkle'], light: ['Light', 'sun'], dark: ['Dark', 'moon'] };
+function themeSeg() {
+  const wrap = h('div', { class: 'seg theme-seg', role: 'group', 'aria-label': 'Appearance' });
+  const draw = () =>
+    wrap.replaceChildren(
+      ...THEMES.map((t) => h('button', { type: 'button', 'aria-pressed': String(getTheme() === t), onClick: () => { setTheme(t); draw(); } }, icon(THEME_UI[t][1], 15), THEME_UI[t][0])),
+    );
+  draw();
+  return wrap;
+}
 
 export const settingsView = defineView({
   title: 'Settings',
@@ -34,6 +46,7 @@ export const settingsView = defineView({
     return h('div', { class: 'stack-lg', style: { maxWidth: '640px' } },
       h('header', { class: 'page-head', style: { marginBottom: '0' } }, h('div', null, h('h1', null, 'Settings'), h('p', null, user.email))),
       h('section', { class: 'card' }, h('h2', { class: 'card-title', style: { marginBottom: '16px' } }, 'Profile'), form),
+      h('section', { class: 'card' }, h('div', { class: 'control' }, h('div', null, h('b', null, 'Appearance'), h('div', { class: 'desc' }, 'Saved on this device.')), themeSeg())),
       h('section', { class: 'card' }, h('div', { class: 'control' }, h('div', null, h('b', null, 'Password'), h('div', { class: 'desc' }, 'Changing it signs you out on other devices.')), h('button', { class: 'btn btn-sm', onClick: () => changePasswordDialog(user) }, icon('key', 16), 'Change'))),
       h('section', { class: 'card' }, h('h2', { class: 'card-title' }, 'About practice money'), h('p', { class: 'text-2', style: { marginTop: '8px' } }, 'Nestly is currently a practice bank: balances are play money and nothing here is connected to a real bank account or card. Linking real cards is coming later.')));
   },

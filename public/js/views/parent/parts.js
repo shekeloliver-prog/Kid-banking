@@ -2,7 +2,7 @@ import { h, setBusy } from '../../dom.js';
 import { icon } from '../../icons.js';
 import { api } from '../../api.js';
 import { avatar, pill, meter, formModal, confirmModal, moneyField, textField, passwordField, pickerGrid, toast, banner } from '../../ui.js';
-import { money, moneyCompact, describeAllowance, timeAgo, AVATARS, COLORS, formatDay } from '../../format.js';
+import { money, moneyCompact, describeAllowance, timeAgo, AVATARS, COLORS, formatDay, CHORE_EMOJI, REPEAT_LABEL } from '../../format.js';
 
 // ───────────────────────── dialogs ─────────────────────────
 
@@ -264,5 +264,78 @@ export function requestHistoryRow(req) {
     avatar(req.kid, 'sm'),
     h('div', { class: 'row-main' }, h('div', { class: 'row-title ellipsis' }, `${req.kid.name} · ${money(req.amountCents)}`), h('div', { class: 'row-sub ellipsis' }, `“${req.reason}”${req.responseNote ? ` — ${req.responseNote}` : ''}`)),
     h('div', { style: { textAlign: 'right' } }, pill(req.status === 'cancelled' ? 'Cancelled' : req.status[0].toUpperCase() + req.status.slice(1), tone), h('div', { class: 'tiny muted', style: { marginTop: '4px' } }, formatDay((req.decidedAt ?? req.createdAt).slice(0, 10), { month: 'short', day: 'numeric' }))),
+  );
+}
+
+// ───────────────────────── chores ─────────────────────────
+
+
+/** Add a chore (pick a kid) or edit one (kid is fixed). */
+export function choreDialog({ kids, chore = null, kidId = null, onDone }) {
+  const editing = !!chore;
+  let kid = editing ? kids.find((k) => k.id === chore.kidId) : kids.find((k) => k.id === kidId) ?? (kids.length === 1 ? kids[0] : null);
+  const picker = !editing && kids.length > 1 ? kidPicker(kids, kid?.id, (k) => { kid = k; modal.el.dataset.color = k.color; }) : null;
+  const title = textField({ label: 'What needs doing?', placeholder: 'e.g. Take out the trash', value: chore?.title ?? '', maxlength: 60, autofocus: !picker });
+  let emoji = chore?.emoji ?? CHORE_EMOJI[0];
+  const emojis = pickerGrid({ items: CHORE_EMOJI, value: emoji, className: 'emoji-grid', label: 'Icon', render: (e) => h('button', { class: 'emoji-btn', 'aria-label': e }, e), onPick: (e) => (emoji = e) });
+  const reward = moneyField({ label: 'Reward', value: chore?.rewardCents ?? 0, quick: [100, 200, 500, 1000], autofocus: false });
+  let repeat = chore?.repeat ?? 'once';
+  const seg = h('div', { class: 'seg seg-full', role: 'group', 'aria-label': 'How often' }, ['once', 'daily', 'weekly'].map((r) => h('button', { type: 'button', 'aria-pressed': String(repeat === r), onClick: (e) => { repeat = r; [...e.currentTarget.parentNode.children].forEach((b) => b.setAttribute('aria-pressed', String(b === e.currentTarget))); } }, REPEAT_LABEL[r])));
+  const modal = formModal({
+    title: editing ? 'Edit chore' : 'Add a chore',
+    subtitle: editing ? undefined : 'Your kid taps “I did it”, you approve, and the reward is paid.',
+    accent: kid?.color,
+    fields: [picker?.el, title.el, h('div', { class: 'field' }, h('span', { class: 'label' }, 'Icon'), emojis.el), reward.el, h('div', { class: 'field' }, h('span', { class: 'label' }, 'How often'), seg, h('div', { class: 'hint' }, 'Daily and weekly chores can be done again after the wait.'))],
+    submitLabel: editing ? 'Save chore' : 'Add chore',
+    onSubmit: async () => {
+      if (!kid) throw new Error('Pick who this chore is for.');
+      const rewardCents = reward.getCents();
+      if (!(rewardCents >= 25)) throw new Error('Rewards start at $0.25.');
+      const body = { title: title.input.value, emoji, rewardCents, repeat };
+      if (editing) await api.patch(`/chores/${chore.id}`, body);
+      else await api.post('/chores', { ...body, kidId: kid.id });
+      toast(editing ? 'Chore saved' : `Chore added for ${kid.name}`, { emoji });
+      onDone?.();
+    },
+  });
+  return modal;
+}
+
+/** A finished chore waiting for the parent: approve (pays the reward) or ask for another try. */
+export function choreClaimItem(claim, { onDone }) {
+  const approve = h('button', { class: 'btn btn-primary btn-sm' }, icon('check', 16), `Pay ${money(claim.rewardCents)}`);
+  const reject = h('button', { class: 'btn btn-danger-soft btn-sm' }, 'Not yet');
+  approve.addEventListener('click', async () => {
+    setBusy(approve, true);
+    try {
+      await api.post(`/chore-claims/${claim.id}/approve`, {});
+      toast(`Paid ${money(claim.rewardCents)} to ${claim.kid.name}`, { emoji: '🎉' });
+      onDone();
+    } catch (e) {
+      toast(e.message, { tone: 'error' });
+      setBusy(approve, false);
+    }
+  });
+  reject.addEventListener('click', () => {
+    const note = textField({ label: 'Say what’s missing (optional)', placeholder: 'e.g. The bin is still full', maxlength: 140, autofocus: true });
+    formModal({
+      title: `Not quite yet?`,
+      subtitle: `${claim.kid.name} · ${claim.emoji} ${claim.title}`,
+      fields: [note.el],
+      submitLabel: 'Ask for another try',
+      tone: 'danger',
+      onSubmit: async () => {
+        await api.post(`/chore-claims/${claim.id}/reject`, { note: note.input.value || null });
+        toast('Sent back to try again');
+        onDone();
+      },
+    });
+  });
+  return h(
+    'div',
+    { class: 'request-card', dataset: { color: claim.kid.color } },
+    avatar(claim.kid, 'md'),
+    h('div', { class: 'grow' }, h('div', { class: 'row-title' }, `${claim.kid.name} finished `, h('span', null, `${claim.emoji} ${claim.title}`)), h('div', { class: 'row-sub' }, `Earns ${money(claim.rewardCents)} · ${timeAgo(claim.createdAt)}`)),
+    h('div', { class: 'cluster' }, reject, approve),
   );
 }

@@ -5,7 +5,7 @@ import { defineView } from '../../view.js';
 import { state } from '../../shell.js';
 import { money, greeting } from '../../format.js';
 import { activityList, emptyState, countUp } from '../../ui.js';
-import { kidCard, requestItem, addFundsDialog, moneyDialog, addKidDialog } from './parts.js';
+import { kidCard, requestItem, choreClaimItem, addFundsDialog, moneyDialog, addKidDialog } from './parts.js';
 
 export function kidGrid(d, refresh) {
   const sendTo = (kid) => moneyDialog({ mode: 'send', kids: d.kids, kidId: kid?.id, balanceCents: d.balanceCents, onDone: refresh });
@@ -77,12 +77,15 @@ export const homeView = defineView({
         stat('target', 'In savings goals', money(d.totals.kidsSavedCents), 'saved for the good stuff'),
         stat('trend', 'Spent this week', money(d.totals.spent7dCents), 'last 7 days'),
       ),
-      d.pendingRequests.length
+      d.pendingRequests.length || d.pendingChores.length
         ? h(
             'section',
             null,
             h('div', { class: 'section-head' }, h('h2', null, 'Waiting for you'), h('a', { class: 'link', href: '#/requests' }, 'View all', icon('right', 16))),
-            h('div', { class: 'card card-flush' }, d.pendingRequests.slice(0, 3).map((r) => requestItem(r, { onDone: refresh }))),
+            h('div', { class: 'card card-flush' }, [
+              ...d.pendingChores.slice(0, 3).map((c) => choreClaimItem(c, { onDone: refresh })),
+              ...d.pendingRequests.slice(0, 3).map((r) => requestItem(r, { onDone: refresh })),
+            ]),
           )
         : null,
       h('section', null, h('div', { class: 'section-head' }, h('h2', null, 'Your kids'), d.kids.length ? h('a', { class: 'link', href: '#/kids' }, 'Manage', icon('right', 16)) : null), kidGrid(d, refresh)),

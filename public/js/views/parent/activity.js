@@ -1,5 +1,7 @@
 import { h } from '../../dom.js';
-import { api } from '../../api.js';
+import { api, download } from '../../api.js';
+import { icon } from '../../icons.js';
+import { toast } from '../../ui.js';
 import { defineView } from '../../view.js';
 import { avatar, activityList } from '../../ui.js';
 
@@ -19,7 +21,12 @@ export const activityView = defineView({
     return h(
       'div',
       { class: 'stack-lg' },
-      h('header', { class: 'page-head', style: { marginBottom: '0' } }, h('div', null, h('h1', null, 'Activity'), h('p', null, 'Every dollar in and out, newest first.'))),
+      h(
+        'header',
+        { class: 'page-head', style: { marginBottom: '0' } },
+        h('div', null, h('h1', null, 'Activity'), h('p', null, 'Every dollar in and out, newest first.')),
+        h('button', { class: 'btn', onClick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await download(`/export.csv${kidId ? `?kid=${kidId}` : ''}`, 'nestly-activity.csv'); } catch (err) { toast(err.message, { tone: 'error' }); } finally { b.disabled = false; } } }, icon('download', 17), 'Export CSV'),
+      ),
       kids.length ? h('div', { class: 'chips' }, chip('Everyone', null), kids.map((k) => chip(k.name, k.id, k))) : null,
       activityList(page.items, 'parent', {
         hasMore: !!cursor,

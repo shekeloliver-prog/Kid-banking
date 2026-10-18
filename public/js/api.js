@@ -39,6 +39,23 @@ async function request(method, path, body) {
   return data;
 }
 
+/** Fetches a file (e.g. the CSV export) and hands it to the browser as a download. */
+export async function download(path, filename) {
+  let res;
+  try {
+    res = await fetch('/api' + path, { credentials: 'same-origin' });
+  } catch {
+    throw new ApiError(0, 'network', "Can't reach Nestly right now. Check your connection and try again.");
+  }
+  if (!res.ok) throw new ApiError(res.status, 'error', describeUnexpected(res.status));
+  const url = URL.createObjectURL(await res.blob());
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 export const api = {
   get: (p) => request('GET', p),
   post: (p, b = {}) => request('POST', p, b),

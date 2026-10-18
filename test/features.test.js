@@ -80,6 +80,7 @@ test('chore lifecycle: assign → kid claims → parent approves → reward is p
   assert.equal(overview.pendingChores.length, 1);
   assert.equal(overview.pendingChores[0].kid.name, 'Mia');
 
+  assert.equal((await parent.c.get(`/api/kids/${kid.id}`)).body.pendingChores.length, 1); // visible on the kid's own page too
   const claimId = claim.body.id;
   const approved = await parent.c.post(`/api/chore-claims/${claimId}/approve`, { note: 'Thanks!' });
   assert.equal(approved.status, 200);
@@ -367,4 +368,39 @@ test('removing a kid also removes their chores, claims and badges', async () => 
     assert.equal((await H.app.db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} = ?`, [kid.id])).n, 0, table);
   }
   await H.assertLedgerBalanced();
+});
+
+// ───────────────────────── installable app ─────────────────────────
+
+test('the web manifest is valid and every file it points to is really served', async () => {
+  const res = await fetch(H.base + '/manifest.webmanifest');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /manifest\+json|application\/json/);
+  const manifest = await res.json();
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.start_url, '/');
+  assert.ok(manifest.icons.some((i) => i.sizes === '192x192') && manifest.icons.some((i) => i.sizes === '512x512'));
+  assert.ok(manifest.icons.some((i) => i.purpose === 'maskable'));
+  for (const icon of manifest.icons) {
+    const r = await fetch(H.base + icon.src);
+    assert.equal(r.status, 200, icon.src);
+    assert.match(r.headers.get('content-type'), icon.type === 'image/svg+xml' ? /svg/ : /png/);
+  }
+  assert.equal((await fetch(H.base + '/icons/apple-touch-icon.png')).status, 200);
+});
+
+test('the service worker is served as JavaScript and never handles API traffic', async () => {
+  const res = await fetch(H.base + '/sw.js');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /javascript/);
+  const code = await res.text();
+  assert.match(code, /startsWith\('\/api\/'\)\) return/); // API requests are left alone
+  assert.doesNotMatch(code, /caches\.(open|put)\([^)]*api/);
+});
+
+test('the early theme script is a plain classic script allowed by the CSP', async () => {
+  const html = await (await fetch(H.base + '/')).text();
+  assert.match(html, /<script src="\/js\/theme-init\.js"><\/script>/);
+  assert.doesNotMatch(html, /<script>[^<]/); // no inline scripts (the CSP forbids them)
+  assert.equal((await fetch(H.base + '/js/theme-init.js')).status, 200);
 });
