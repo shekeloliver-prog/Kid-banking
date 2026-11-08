@@ -47,4 +47,42 @@ export const MIGRATIONS = [
        )`,
     ],
   },
+  {
+    version: 3,
+    name: 'lessons, cheers, house rules, signed-in devices',
+    statements: [
+      // One row per quiz attempt: the best result and the learning streak are both derived from these.
+      `CREATE TABLE IF NOT EXISTS lesson_attempts (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         kid_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         lesson_key TEXT NOT NULL,
+         correct    INTEGER NOT NULL,
+         total      INTEGER NOT NULL,
+         passed     INTEGER NOT NULL,
+         day        TEXT NOT NULL,
+         created_at TEXT NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS lesson_attempts_kid ON lesson_attempts(kid_id, lesson_key)`,
+      `CREATE TABLE IF NOT EXISTS kudos (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         parent_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         kid_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         emoji      TEXT NOT NULL,
+         message    TEXT NOT NULL,
+         thanked_at TEXT,
+         created_at TEXT NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS kudos_kid ON kudos(kid_id, id DESC)`,
+      `CREATE TABLE IF NOT EXISTS house_rules (
+         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+         parent_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+         position   INTEGER NOT NULL,
+         text       TEXT NOT NULL,
+         created_at TEXT NOT NULL
+       )`,
+      `CREATE INDEX IF NOT EXISTS house_rules_parent ON house_rules(parent_id, position)`,
+      // A readable label such as "Chrome on Mac", so people can recognise where they're signed in.
+      `ALTER TABLE sessions ADD COLUMN device TEXT`,
+    ],
+  },
 ];

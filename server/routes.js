@@ -2,8 +2,9 @@ import { timingSafeEqual } from 'node:crypto';
 import { HttpError, text, cents, oneOf, password, email, username, id, timezone, AVATARS, COLORS, CATEGORIES } from './lib/util.js';
 import { CHORE_EMOJI, REPEATS, MIN_REWARD_CENTS, MAX_REWARD_CENTS } from './lib/chores.js';
 import { INSIGHT_RANGES, activityCsv } from './lib/insights.js';
+import { KUDOS_EMOJI, MAX_RULES } from './lib/family.js';
 import { RawResponse } from './lib/http.js';
-import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions, purgeExpiredSessions, AttemptLimiter } from './lib/auth.js';
+import { hashPassword, verifyPassword, burnPasswordCheck, createSession, destroySession, destroyUserSessions, purgeExpiredSessions, listSessions, revokeSession, deviceLabel, AttemptLimiter } from './lib/auth.js';
 
 const KID_PIN_MIN = 6;
 
@@ -42,7 +43,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
   }
 
   async function startSession(ctx, user) {
-    const { token, expires } = await createSession(db, user.id, clock());
+    const { token, expires } = await createSession(db, user.id, clock(), deviceLabel(ctx.req.headers['user-agent']));
     ctx.setSession(token, expires);
   }
 
@@ -191,10 +192,29 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     return { user: userDto(await bank.getUser(ctx.user.id)) };
   });
 
+  // Permanently deletes the family. Needs the password, and is rate-limited like any other password check.
+  del('/api/me', 'parent', async (ctx) => {
+    await confirmPassword(ctx, ctx.body.password);
+    const { deletedKids } = await bank.deleteAccount(ctx.user.id);
+    ctx.clearSession();
+    return { ok: true, deletedKids };
+  });
+
   post('/api/auth/password', 'user', async (ctx) => {
     await confirmPassword(ctx, ctx.body.current);
     const next = password(ctx.body.next, { min: ctx.user.role === 'parent' ? 8 : KID_PIN_MIN, field: ctx.user.role === 'parent' ? 'New password' : 'New PIN' });
     await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [await hashPassword(next), ctx.user.id]);
+    await destroyUserSessions(db, ctx.user.id, ctx.token);
+    return { ok: true };
+  });
+
+  // ───────────── where I'm signed in ─────────────
+  get('/api/auth/sessions', 'user', async (ctx) => ({ items: await listSessions(db, ctx.user.id, ctx.token, clock()) }));
+  del('/api/auth/sessions/:id', 'user', async (ctx) => {
+    if (!(await revokeSession(db, ctx.user.id, ctx.params.id, ctx.token))) throw new HttpError(404, 'not_found', 'That device was already signed out.');
+    return { ok: true };
+  });
+  post('/api/auth/sessions/revoke-others', 'user', async (ctx) => {
     await destroyUserSessions(db, ctx.user.id, ctx.token);
     return { ok: true };
   });
@@ -283,11 +303,21 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     limit: Math.min(Math.max(Number(ctx.query.get('limit')) || 30, 1), 100),
   });
 
+  /** Search / direction / look-back from the query string, shared by the parent and kid activity lists. */
+  const activityFilters = (ctx) => {
+    const search = text(ctx.query.get('q') ?? '', { field: 'Search', max: 40, optional: true });
+    const direction = ctx.query.get('dir') || null;
+    if (direction && !['in', 'out'].includes(direction)) throw new HttpError(400, 'invalid', 'Pick money in or money out.');
+    const days = ctx.query.get('days') ? Number(ctx.query.get('days')) : null;
+    if (days !== null && !INSIGHT_RANGES.includes(days)) throw new HttpError(400, 'invalid', 'Pick 7, 30 or 90 days.');
+    return { search, direction, days };
+  };
+
   get('/api/activity', 'parent', async (ctx) => {
     const kidParam = ctx.query.get('kid');
     const kidId = kidParam ? id(kidParam) : null;
     if (kidId) await bank.ownKid(ctx.user.id, kidId);
-    return bank.familyActivity(ctx.user.id, { kidId, ...pageParams(ctx) });
+    return bank.familyActivity(ctx.user.id, { kidId, ...pageParams(ctx), ...activityFilters(ctx) });
   });
 
   // ───────────── parent: chores ─────────────
@@ -324,12 +354,47 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
     const kidParam = ctx.query.get('kid');
     const kidId = kidParam ? id(kidParam) : null;
     if (kidId) await bank.ownKid(ctx.user.id, kidId);
-    const { items } = await bank.familyActivity(ctx.user.id, { kidId, limit: 5000 });
+    const { items } = await bank.familyActivity(ctx.user.id, { kidId, limit: 5000, ...activityFilters(ctx) });
     const stamp = clock().toISOString().slice(0, 10);
     return new RawResponse(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="nestly-activity-${stamp}.csv"` }, activityCsv(items.reverse()));
   });
 
+  get('/api/export.json', 'parent', async (ctx) => {
+    const stamp = clock().toISOString().slice(0, 10);
+    const data = await bank.exportFamily(ctx.user.id);
+    return new RawResponse(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="nestly-data-${stamp}.json"` }, JSON.stringify(data, null, 2));
+  });
+
+  // ───────────── parent: cheers + house rules ─────────────
+  post('/api/kids/:id/cheers', 'parent', async (ctx) => ({
+    id: await bank.sendKudos(ctx.user.id, id(ctx.params.id), {
+      emoji: oneOf(ctx.body.emoji ?? KUDOS_EMOJI[0], KUDOS_EMOJI, { field: 'Emoji' }),
+      message: text(ctx.body.message, { field: 'Message', max: 120 }),
+    }),
+  }));
+
+  get('/api/rules', 'parent', async (ctx) => ({ rules: (await bank.rulesFor(ctx.user.id)).map((r) => r.text), max: MAX_RULES }));
+  put('/api/rules', 'parent', async (ctx) => {
+    if (!Array.isArray(ctx.body.rules)) throw new HttpError(400, 'invalid', 'Rules must be a list.');
+    const entries = ctx.body.rules.filter((r) => typeof r !== 'string' || r.trim());
+    if (entries.length > MAX_RULES) throw new HttpError(400, 'invalid', `You can have up to ${MAX_RULES} house rules.`);
+    const rules = entries.map((r) => text(r, { field: 'Rule', max: 90 }));
+    return { rules: (await bank.setRules(ctx.user.id, rules)).map((r) => r.text) };
+  });
+
   // ───────────── kid ─────────────
+  get('/api/kid/learn', 'kid', (ctx) => bank.lessonsFor(ctx.user.id));
+  get('/api/kid/learn/:key', 'kid', (ctx) => bank.lessonDetail(ctx.params.key));
+  post('/api/kid/learn/:key', 'kid', (ctx) => bank.submitLesson(ctx.user.id, ctx.params.key, ctx.body.answers));
+  post('/api/kid/cheers/:id/thanks', 'kid', (ctx) => bank.thankKudos(ctx.user.id, id(ctx.params.id)));
+  patch('/api/kid/profile', 'kid', async (ctx) => {
+    await bank.updateOwnProfile(ctx.user.id, {
+      avatar: oneOf(ctx.body.avatar, AVATARS, { field: 'Avatar' }),
+      color: oneOf(ctx.body.color, COLORS, { field: 'Color' }),
+    });
+    return { user: userDto(await bank.getUser(ctx.user.id)) };
+  });
+
   get('/api/kid/chores', 'kid', (ctx) => bank.choresForKid(ctx.user.id));
   post('/api/kid/chores/:id/claim', 'kid', async (ctx) => ({ id: await bank.claimChore(ctx.user.id, id(ctx.params.id)) }));
   del('/api/kid/chore-claims/:id', 'kid', async (ctx) => {
@@ -338,7 +403,7 @@ export function registerRoutes(router, { db, bank, limiters, clock, cronSecret, 
   });
 
   get('/api/kid/overview', 'kid', (ctx) => bank.kidOverview(ctx.user.id));
-  get('/api/kid/activity', 'kid', (ctx) => bank.kidActivity(ctx.user.id, pageParams(ctx)));
+  get('/api/kid/activity', 'kid', (ctx) => bank.kidActivity(ctx.user.id, { ...pageParams(ctx), ...activityFilters(ctx) }));
 
   post('/api/kid/spend', 'kid', (ctx) =>
     bank.spend(

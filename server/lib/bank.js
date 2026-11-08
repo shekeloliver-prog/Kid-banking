@@ -16,6 +16,9 @@ import { dateInZone, firstDue, advance, addDays } from './dates.js';
 import { createBadges } from './badges.js';
 import { createChores } from './chores.js';
 import { createInsights } from './insights.js';
+import { createLessons } from './lessons.js';
+import { createFamily } from './family.js';
+import { createData } from './data.js';
 
 export const KID_ONLY_KINDS = ['spend', 'goal_save', 'goal_release', 'goal_purchase'];
 export const MAX_DEPOSIT_CENTS = 50_000; // $500 of practice money at a time
@@ -273,16 +276,7 @@ export function createBank(db, clock = () => new Date()) {
       if (returned > 0) {
         await post(parentId, { kind: 'closed_in', amount: returned, counterparty: kid, note: `Closed ${kid.name}'s account` });
       }
-      // Explicit deletes (children first) so correctness never depends on the database enforcing ON DELETE rules.
-      await q('UPDATE transactions SET counterparty_id = NULL WHERE counterparty_id = ?').run(kidId);
-      await q('DELETE FROM chore_claims WHERE kid_id = ?').run(kidId);
-      await q('DELETE FROM chores WHERE kid_id = ?').run(kidId);
-      await q('DELETE FROM badges WHERE kid_id = ?').run(kidId);
-      for (const [table, column] of [['transactions', 'user_id'], ['goals', 'kid_id'], ['money_requests', 'kid_id'], ['notifications', 'user_id'], ['sessions', 'user_id']]) {
-        await q(`DELETE FROM ${table} WHERE ${column} = ?`).run(kidId);
-      }
-      await q('DELETE FROM kid_controls WHERE kid_id = ?').run(kidId);
-      await q('DELETE FROM users WHERE id = ?').run(kidId);
+      await core.data.purgeKid(kidId); // explicit deletes, children first (see data.js)
       return { returnedCents: returned };
     });
   }
@@ -601,8 +595,31 @@ export function createBank(db, clock = () => new Date()) {
     };
   }
 
+  /**
+   * Optional narrowing for an activity list: free-text `search` (names, notes, categories and what kind of entry it
+   * is), `direction` ('in' or 'out') and a look-back window of `days`.
+   */
+  function filterSql({ search = null, direction = null, days = null } = {}, { ownerName = false } = {}) {
+    const sql = [];
+    const args = [];
+    if (search) {
+      const like = `%${search.toLowerCase().replace(/[\\%_]/g, (c) => '\\' + c)}%`;
+      const fields = [`LOWER(COALESCE(t.note, ''))`, `LOWER(COALESCE(t.counterparty_name, ''))`, `LOWER(COALESCE(t.category, ''))`, `REPLACE(t.kind, '_', ' ')`];
+      if (ownerName) fields.push('LOWER(u.name)'); // the family list joins the account holder as `u`
+      sql.push(`(${fields.map((f) => `${f} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
+      args.push(...fields.map(() => like));
+    }
+    if (direction === 'in') sql.push('t.amount_cents > 0');
+    if (direction === 'out') sql.push('t.amount_cents < 0');
+    if (days) {
+      sql.push('t.created_at >= ?');
+      args.push(new Date(clock().getTime() - days * DAY_MS).toISOString());
+    }
+    return { sql, args };
+  }
+
   /** The parent's view of everything happening in the family, newest first. */
-  async function familyActivity(parentId, { kidId = null, before = null, limit = 30 } = {}) {
+  async function familyActivity(parentId, { kidId = null, before = null, limit = 30, ...filters } = {}) {
     const kindList = KID_ONLY_KINDS.map(() => '?').join(',');
     const where = [];
     const args = [];
@@ -617,6 +634,9 @@ export function createBank(db, clock = () => new Date()) {
       where.push('t.id < ?');
       args.push(before);
     }
+    const f = filterSql(filters, { ownerName: true });
+    where.push(...f.sql);
+    args.push(...f.args);
     const rows = await q(
       `SELECT t.*, u.id AS owner_id, u.name AS owner_name, u.avatar AS owner_avatar, u.color AS owner_color, u.role AS owner_role
        FROM transactions t JOIN users u ON u.id = t.user_id
@@ -626,10 +646,17 @@ export function createBank(db, clock = () => new Date()) {
     return { items, nextBefore: rows.length > limit ? items[items.length - 1].id : null };
   }
 
-  async function kidActivity(kidId, { before = null, limit = 30 } = {}) {
-    const rows = await q(
-      `SELECT * FROM transactions WHERE user_id = ? ${before ? 'AND id < ?' : ''} ORDER BY id DESC LIMIT ?`,
-    ).all(...(before ? [kidId, before, limit + 1] : [kidId, limit + 1]));
+  async function kidActivity(kidId, { before = null, limit = 30, ...filters } = {}) {
+    const where = ['t.user_id = ?'];
+    const args = [kidId];
+    if (before) {
+      where.push('t.id < ?');
+      args.push(before);
+    }
+    const f = filterSql(filters);
+    where.push(...f.sql);
+    args.push(...f.args);
+    const rows = await q(`SELECT t.* FROM transactions t WHERE ${where.join(' AND ')} ORDER BY t.id DESC LIMIT ?`).all(...args, limit + 1);
     const items = rows.slice(0, limit).map(txDto);
     return { items, nextBefore: rows.length > limit ? items[items.length - 1].id : null };
   }
@@ -663,13 +690,15 @@ export function createBank(db, clock = () => new Date()) {
   }
 
   async function parentOverview(parentId) {
-    const [parent, kidRows, depositRow, pendingRequests, recent, pendingChores] = await Promise.all([
+    const [parent, kidRows, depositRow, pendingRequests, recent, pendingChores, choreRow, ruleRow] = await Promise.all([
       getUser(parentId),
       q("SELECT * FROM users WHERE parent_id = ? AND role = 'kid' ORDER BY id").all(parentId),
       q("SELECT 1 AS x FROM transactions WHERE user_id = ? AND kind = 'deposit' LIMIT 1").get(parentId),
       requestsForParent(parentId, { status: 'pending' }),
       familyActivity(parentId, { limit: 8 }),
       core.chores.pendingClaimsForParent(parentId, 20),
+      q("SELECT 1 AS x FROM chores WHERE parent_id = ? LIMIT 1").get(parentId),
+      q('SELECT 1 AS x FROM house_rules WHERE parent_id = ? LIMIT 1').get(parentId),
     ]);
     const kids = await Promise.all(kidRows.map(kidSummary));
     return {
@@ -687,6 +716,8 @@ export function createBank(db, clock = () => new Date()) {
         funds: !!depositRow || parent.balance_cents > 0,
         kid: kids.length > 0,
         allowance: kids.some((k) => k.allowance.active),
+        chore: !!choreRow,
+        rules: !!ruleRow,
       },
     };
   }
@@ -699,7 +730,7 @@ export function createBank(db, clock = () => new Date()) {
     const buckets = new Map();
     for (let i = days - 1; i >= 0; i--) buckets.set(addDays(today, -i), 0);
     const since = new Date(clock().getTime() - (days + 1) * DAY_MS).toISOString();
-    const [spends, summary, goals, recent, requests, badges, allPendingChores] = await Promise.all([
+    const [spends, summary, goals, recent, requests, badges, allPendingChores, learning, cheers] = await Promise.all([
       q("SELECT amount_cents, created_at FROM transactions WHERE user_id = ? AND kind = 'spend' AND created_at > ?").all(kidId, since),
       kidSummary(kid),
       goalsFor(kidId),
@@ -707,6 +738,8 @@ export function createBank(db, clock = () => new Date()) {
       requestsForKid(kidId, 5),
       core.badges.badgesFor(kidId),
       core.chores.pendingClaimsForParent(parentId, 100),
+      core.lessons.lessonsFor(kidId),
+      core.family.kudosForKid(kidId, 5),
     ]);
     for (const r of spends) {
       const d = dateInZone(new Date(r.created_at), zone);
@@ -720,6 +753,8 @@ export function createBank(db, clock = () => new Date()) {
       requests,
       badges,
       pendingChores: allPendingChores.filter((c) => c.kid.id === kidId),
+      learning,
+      cheers,
       today,
     };
   }
@@ -727,13 +762,16 @@ export function createBank(db, clock = () => new Date()) {
   async function kidOverview(kidId) {
     const kid = await getUser(kidId);
     const parent = await getUser(kid.parent_id);
-    const [summary, goals, recent, requests, badges, chores] = await Promise.all([
+    const [summary, goals, recent, requests, badges, chores, learning, cheers, rules] = await Promise.all([
       kidSummary(kid),
       goalsFor(kidId),
       kidActivity(kidId, { limit: 6 }),
       requestsForKid(kidId, 10),
       core.badges.badgesFor(kidId),
       core.chores.choresForKid(kidId),
+      core.lessons.lessonsFor(kidId),
+      core.family.kudosForKid(kidId, 4),
+      core.family.rulesFor(kid.parent_id),
     ]);
     return {
       kid: summary,
@@ -743,6 +781,9 @@ export function createBank(db, clock = () => new Date()) {
       requests,
       badges,
       chores,
+      learning: { passedCount: learning.passedCount, total: learning.total, streak: learning.streak, doneToday: learning.doneToday },
+      cheers,
+      rules: rules.map((r) => r.text),
       today: dateInZone(clock(), parent.timezone),
     };
   }
@@ -778,6 +819,9 @@ export function createBank(db, clock = () => new Date()) {
   core.badges = createBadges(core);
   core.awardBadges = core.badges.awardBadges;
   core.chores = createChores(core);
+  core.lessons = createLessons(core);
+  core.family = createFamily(core);
+  core.data = createData(core);
   const insights = createInsights(core);
 
   /** Everything that should happen "on a schedule" (today: allowances). */
@@ -788,7 +832,11 @@ export function createBank(db, clock = () => new Date()) {
   return {
     ...core.chores,
     ...core.badges,
+    ...core.lessons,
+    ...core.family,
     ...insights,
+    exportFamily: core.data.exportFamily,
+    deleteAccount: core.data.deleteParent,
     runScheduled,
     atomic,
     getUser,

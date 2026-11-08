@@ -7,6 +7,8 @@ import { createClient } from '@libsql/client';
 import { Db, SCHEMA } from '../server/lib/db.js';
 import { createApp } from '../server/app.js';
 import { activityCsv, csvCell } from '../server/lib/insights.js';
+import { MIGRATIONS } from '../server/lib/migrations.js';
+import { BADGES } from '../server/lib/badges.js';
 import { makeHarness, Client, DAY } from './helpers.js';
 
 let H;
@@ -23,8 +25,8 @@ beforeEach(async () => {
 
 test('a fresh database ends up fully migrated, exactly once', async () => {
   const versions = await H.app.db.all('SELECT version FROM schema_migrations ORDER BY version');
-  assert.deepEqual(versions.map((v) => v.version), [2]);
-  for (const table of ['chores', 'chore_claims', 'badges']) assert.ok(await H.app.db.get(`SELECT 1 AS x FROM sqlite_master WHERE name = ?`, [table]), table);
+  assert.deepEqual(versions.map((v) => v.version), MIGRATIONS.map((m) => m.version));
+  for (const table of ['chores', 'chore_claims', 'badges', 'lesson_attempts', 'kudos', 'house_rules']) assert.ok(await H.app.db.get(`SELECT 1 AS x FROM sqlite_master WHERE name = ?`, [table]), table);
   const cols = (await H.app.db.all('PRAGMA table_info(kid_controls)')).map((c) => c.name);
   assert.ok(cols.includes('interest_bps') && cols.includes('interest_next'));
 });
@@ -47,7 +49,7 @@ test('an existing version-1 database upgrades in place without losing data, and 
     assert.equal(c.weekly_limit_cents, 2500);
     assert.equal(c.allowance_next, '2026-10-16');
     assert.equal(c.interest_bps, 0); // new column defaults safely
-    assert.equal((await db.all('SELECT version FROM schema_migrations')).length, 1);
+    assert.equal((await db.all('SELECT version FROM schema_migrations')).length, MIGRATIONS.length);
     await db.close();
   }
 });
@@ -56,7 +58,7 @@ test('two instances starting at the same moment on one database both come up cle
   const file = `file:${join(mkdtempSync(join(tmpdir(), 'nestly-race-')), 'race.db')}`;
   const dbs = Array.from({ length: 4 }, () => new Db(createClient({ url: file })));
   await Promise.all(dbs.map((d) => d.ensureReady()));
-  assert.equal((await dbs[0].all('SELECT version FROM schema_migrations')).length, 1);
+  assert.equal((await dbs[0].all('SELECT version FROM schema_migrations')).length, MIGRATIONS.length);
   await Promise.all(dbs.map((d) => d.close()));
 });
 
@@ -230,7 +232,7 @@ test('badges unlock from real actions, once, and show on both the kid and parent
   const titles = (await kid.c.get('/api/notifications')).body.items.map((n) => n.title).filter((t) => t.startsWith('New badge'));
   assert.equal(new Set(titles).size, titles.length, 'no badge is announced twice');
   const asParent = (await parent.c.get(`/api/kids/${kid.id}`)).body.badges;
-  assert.equal(asParent.length, 6);
+  assert.equal(asParent.length, BADGES.length);
   assert.equal(asParent.filter((b) => b.earned).length, (await earned()).length);
 });
 

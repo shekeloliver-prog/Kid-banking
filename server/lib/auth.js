@@ -60,17 +60,56 @@ export async function burnPasswordCheck(password) {
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
-export async function createSession(db, userId, now = new Date()) {
+/** A short, human label such as "Chrome on Mac" from a User-Agent, so people can recognise their own devices. */
+export function deviceLabel(userAgent) {
+  const ua = String(userAgent ?? '').slice(0, 400);
+  const browser = /Edg(e|A|iOS)?\//.test(ua) ? 'Edge' : /OPR\/|Opera/.test(ua) ? 'Opera' : /Firefox\/|FxiOS/.test(ua) ? 'Firefox' : /Chrome\/|CriOS/.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'A browser';
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'Mac' : /CrOS/.test(ua) ? 'ChromeOS' : /Linux/.test(ua) ? 'Linux' : null;
+  return os ? `${browser} on ${os}` : browser;
+}
+
+export async function createSession(db, userId, now = new Date(), device = null) {
   const token = randomBytes(32).toString('base64url');
   const expires = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-  await db.run('INSERT INTO sessions (token_hash, user_id, created_at, last_seen, expires_at) VALUES (?, ?, ?, ?, ?)', [
+  await db.run('INSERT INTO sessions (token_hash, user_id, created_at, last_seen, expires_at, device) VALUES (?, ?, ?, ?, ?, ?)', [
     sha256(token),
     userId,
     now.toISOString(),
     now.toISOString(),
     expires,
+    device,
   ]);
   return { token, expires };
+}
+
+const SESSION_ID_LEN = 16;
+
+/** Where this account is signed in. The id is a prefix of the stored token hash: enough to name a session, useless as a credential. */
+export async function listSessions(db, userId, currentToken, now = new Date()) {
+  const mine = currentToken ? sha256(currentToken) : null;
+  const rows = await db.all(
+    'SELECT token_hash, device, created_at, last_seen FROM sessions WHERE user_id = ? AND expires_at > ? ORDER BY last_seen DESC LIMIT 50',
+    [userId, now.toISOString()],
+  );
+  return rows.map((r) => ({
+    id: r.token_hash.slice(0, SESSION_ID_LEN),
+    device: r.device || 'Unknown device',
+    signedInAt: r.created_at,
+    lastActive: r.last_seen,
+    current: r.token_hash === mine,
+  }));
+}
+
+/** Signs one other device out. Returns false if there was no such session (or it is the one in use). */
+export async function revokeSession(db, userId, sessionId, currentToken) {
+  if (typeof sessionId !== 'string' || !/^[0-9a-f]{16}$/.test(sessionId)) return false;
+  const info = await db.run('DELETE FROM sessions WHERE user_id = ? AND substr(token_hash, 1, ?) = ? AND token_hash != ?', [
+    userId,
+    SESSION_ID_LEN,
+    sessionId,
+    sha256(currentToken ?? ''),
+  ]);
+  return info.changes > 0;
 }
 
 export async function lookupSession(db, token, now = new Date()) {
