@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { openDb } from './lib/db.js';
 import { createBank } from './lib/bank.js';
 import { hashPassword } from './lib/auth.js';
+import { LESSONS } from './lib/lessons.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dbPath = join(root, 'data', 'demo.db');
@@ -48,6 +49,9 @@ const doChore = async (kidId, choreId) => {
   await bank.decideClaim(parent.id, claimId, true, null);
 };
 
+await bank.setRules(parent.id, ['Ask before spending more than $20', 'Save a little from every allowance', 'Chores come before screens']);
+const passLesson = (kidId, lesson) => bank.submitLesson(kidId, lesson.key, lesson.questions.map((q) => q.answer));
+
 const miaGoal = await bank.createGoal(mia, { name: 'New scooter', emoji: '🛹', targetCents: 6000 });
 const miaGoal2 = await bank.createGoal(mia, { name: 'Art supplies', emoji: '🎨', targetCents: 2500 });
 const leoGoal = await bank.createGoal(leo, { name: 'Soccer cleats', emoji: '⚽', targetCents: 4500 });
@@ -83,8 +87,18 @@ for (let day = 0; day < 36; day++) {
   if (day % 7 === 2) await attempt(() => doChore(mia, trashChore));
   if (day % 7 === 4) await attempt(() => doChore(leo, lawnChore));
   if (day === 20) await attempt(() => doChore(leo, roomChore));
+  if (day >= 31) await attempt(() => passLesson(mia, LESSONS[day - 31]));
+  if (day === 33 || day === 35) await attempt(() => passLesson(leo, LESSONS[day === 33 ? 0 : 1]));
   tick(11 * 3600000);
 }
+
+// Encouragement from the parent, one already thanked.
+clockMs = realNow - 26 * 3600000;
+await bank.sendKudos(parent.id, mia, { emoji: '🏆', message: 'Four lessons in a row. So proud of you!' });
+clockMs = realNow - 5 * 3600000;
+await bank.sendKudos(parent.id, leo, { emoji: '💪', message: 'Thanks for mowing the lawn without being asked' });
+const miaCheer = (await bank.kudosForKid(mia, 1))[0];
+await bank.thankKudos(mia, miaCheer.id);
 
 // A few things waiting for the parent today.
 clockMs = realNow - 3 * 3600000;

@@ -3,7 +3,7 @@ import { api, download } from '../../api.js';
 import { icon } from '../../icons.js';
 import { toast } from '../../ui.js';
 import { defineView } from '../../view.js';
-import { avatar, activityList } from '../../ui.js';
+import { avatar, filteredActivity } from '../../ui.js';
 
 export const activityView = defineView({
   title: 'Activity',
@@ -15,7 +15,13 @@ export const activityView = defineView({
     return { kids: overview.kids, kidId: kidParam ? Number(kidParam) : null, page };
   },
   render: ({ kids, kidId, page }) => {
-    let cursor = page.nextBefore;
+    const kidQuery = kidId ? `&kid=${kidId}` : '';
+    const list = filteredActivity({
+      view: 'parent',
+      first: page,
+      emptyText: 'Add funds or send money and it will show up here.',
+      fetchPage: (before, query) => api.get(`/activity?limit=30${before ? `&before=${before}` : ''}${kidQuery}${query}`),
+    });
     const chip = (label, id, kid) =>
       h('a', { class: 'chip', href: id ? `#/activity?kid=${id}` : '#/activity', 'aria-pressed': String(kidId === id), style: { textDecoration: 'none' } }, kid ? avatar(kid, 'xs') : null, label);
     return h(
@@ -24,19 +30,11 @@ export const activityView = defineView({
       h(
         'header',
         { class: 'page-head', style: { marginBottom: '0' } },
-        h('div', null, h('h1', null, 'Activity'), h('p', null, 'Every dollar in and out, newest first.')),
-        h('button', { class: 'btn', onClick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await download(`/export.csv${kidId ? `?kid=${kidId}` : ''}`, 'nestly-activity.csv'); } catch (err) { toast(err.message, { tone: 'error' }); } finally { b.disabled = false; } } }, icon('download', 17), 'Export CSV'),
+        h('div', null, h('h1', null, 'Activity'), h('p', null, 'Every dollar in and out, newest first. Search or filter to find something.')),
+        h('button', { class: 'btn', onClick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await download(`/export.csv?${new URLSearchParams(`${kidQuery}${list.query()}`.slice(1)).toString()}`, 'nestly-activity.csv'); } catch (err) { toast(err.message, { tone: 'error' }); } finally { b.disabled = false; } } }, icon('download', 17), 'Export CSV'),
       ),
       kids.length ? h('div', { class: 'chips' }, chip('Everyone', null), kids.map((k) => chip(k.name, k.id, k))) : null,
-      activityList(page.items, 'parent', {
-        hasMore: !!cursor,
-        emptyText: 'Add funds or send money and it will show up here.',
-        loadMore: async () => {
-          const next = await api.get(`/activity?limit=30&before=${cursor}${kidId ? `&kid=${kidId}` : ''}`);
-          cursor = next.nextBefore;
-          return { rows: next.items, more: !!cursor };
-        },
-      }),
+      list.el,
     );
   },
 });

@@ -1,7 +1,7 @@
 import { h } from './dom.js';
 import { icon, logo } from './icons.js';
 import { api } from './api.js';
-import { avatar, toast, formModal, passwordField } from './ui.js';
+import { avatar, toast, formModal, passwordField, identityPicker } from './ui.js';
 import { timeAgo } from './format.js';
 import { getTheme, setTheme, THEMES } from './theme.js';
 
@@ -115,6 +115,24 @@ function changePasswordDialog(user) {
 }
 export { changePasswordDialog };
 
+/** A kid picks their own avatar and colour. The header and menu update straight away. */
+function profileDialog(user) {
+  const picker = identityPicker({ avatar: user.avatar, color: user.color, name: user.name, caption: 'This is how you look in Nestly' });
+  formModal({
+    title: 'Make it mine',
+    subtitle: 'Pick the avatar and colour you like best.',
+    fields: picker.nodes,
+    submitLabel: 'Save',
+    accent: user.color,
+    onSubmit: async () => {
+      const r = await api.patch('/kid/profile', picker.get());
+      state.user = { ...state.user, avatar: r.user.avatar, color: r.user.color };
+      setCounts({});
+      toast('Looking good!', { emoji: r.user.avatar });
+    },
+  });
+}
+
 const THEME_LABEL = { system: 'Match my device', light: 'Light', dark: 'Dark' };
 function themeMenuItem() {
   const label = h('span', null);
@@ -130,13 +148,16 @@ function themeMenuItem() {
 }
 
 function userMenu(user, onLogout) {
-  const btn = h('button', { class: 'icon-btn user-btn', type: 'button', 'aria-label': 'Account menu', style: { padding: '0', border: '0', background: 'none' } }, avatar(user.role === 'kid' ? user : { ...user, avatar: user.name.trim()[0]?.toUpperCase() ?? '?', color: 'violet' }, 'sm'));
+  const face = (u) => avatar(u.role === 'kid' ? u : { ...u, avatar: u.name.trim()[0]?.toUpperCase() ?? '?', color: 'violet' }, 'sm');
+  const btn = h('button', { class: 'icon-btn user-btn', type: 'button', 'aria-label': 'Account menu', style: { padding: '0', border: '0', background: 'none' } }, face(user));
+  if (user.role === 'kid') onState(() => btn.replaceChildren(face(state.user)));
   return dropdown(btn, (close) =>
     h(
       'div',
       { class: 'menu', role: 'menu' },
       h('div', { class: 'menu-label' }, user.role === 'kid' ? `@${user.username}` : user.email),
       user.role === 'parent' ? h('button', { role: 'menuitem', onClick: () => { close(); location.hash = '#/settings'; } }, icon('sliders', 18), 'Settings') : null,
+      user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); profileDialog(state.user); } }, icon('sparkle', 18), 'Make it mine') : null,
       user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); changePasswordDialog(user); } }, icon('key', 18), 'Change my PIN') : null,
       themeMenuItem(),
       h('button', { role: 'menuitem', onClick: onLogout }, icon('logout', 18), 'Log out'),
@@ -215,6 +236,7 @@ const KID_NAV = [
   { href: '#/', label: 'Home', icon: 'home', match: (p) => p === '/' },
   { href: '#/goals', label: 'Goals', icon: 'target', match: (p) => p === '/goals' },
   { href: '#/chores', label: 'Chores', icon: 'check', match: (p) => p === '/chores' },
+  { href: '#/learn', label: 'Learn', icon: 'book', match: (p) => p.startsWith('/learn') },
   { href: '#/activity', label: 'Activity', icon: 'list', match: (p) => p === '/activity' },
   { href: '#/ask', label: 'Ask', icon: 'hand', match: (p) => p === '/ask' },
 ];
@@ -222,16 +244,21 @@ const KID_NAV = [
 export function buildKidShell(user, onLogout) {
   const host = h('main', { class: 'kid-main', id: 'view', tabindex: '-1' });
   const links = KID_NAV.map((n) => ({ n, a: h('a', { href: n.href }, icon(n.icon, 20), h('span', null, n.label)) }));
+  const face = h('span', { class: 'face' }, avatar(user, 'sm'));
   const el = h(
     'div',
     { class: 'kid-shell', dataset: { color: user.color } },
     h(
       'header',
       { class: 'kid-top' },
-      h('div', { class: 'kid-top-in' }, avatar(user, 'sm'), h('b', { style: { fontSize: '18px' }, title: user.name }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
+      h('div', { class: 'kid-top-in' }, face, h('b', { style: { fontSize: '18px' }, title: user.name }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
     ),
     host,
   );
+  onState(() => {
+    face.replaceChildren(avatar(state.user, 'sm'));
+    el.dataset.color = state.user.color;
+  });
   const setActive = (path) => {
     for (const l of links) {
       if (l.n.match(path)) l.a.setAttribute('aria-current', 'page');

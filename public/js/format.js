@@ -94,4 +94,6 @@ export const REPEAT_LABEL = { once: 'One time', daily: 'Every day', weekly: 'Eve
 
 export const AVATARS = ['🦊', '🐼', '🐸', '🦄', '🐯', '🐙', '🦁', '🐧', '🐨', '🐶', '🐱', '🦖', '🚀', '⚽', '🎨', '🎮'];
 export const COLORS = ['violet', 'blue', 'teal', 'green', 'amber', 'orange', 'pink', 'red'];
+export const KUDOS_EMOJI = ['⭐', '🌟', '👏', '💪', '🎉', '🏆', '❤️', '🚀', '🧠', '🙌'];
+export const CHEER_IDEAS = ['Great job today!', 'So proud of you', 'Thanks for helping out', 'Nice saving!', 'Way to go on that test', 'You stayed kind. I noticed!'];
 export const GOAL_EMOJI = ['🎯', '🚲', '🎮', '🧸', '📱', '🎧', '👟', '🎸', '⚽', '🎨', '🚀', '📚', '🎁', '🏕️', '🛹', '🐶'];

@@ -2,7 +2,7 @@ import { h, setBusy } from '../../dom.js';
 import { icon } from '../../icons.js';
 import { api } from '../../api.js';
 import { avatar, pill, meter, formModal, confirmModal, moneyField, textField, passwordField, pickerGrid, toast, banner } from '../../ui.js';
-import { money, moneyCompact, describeAllowance, timeAgo, AVATARS, COLORS, formatDay, CHORE_EMOJI, REPEAT_LABEL } from '../../format.js';
+import { money, moneyCompact, describeAllowance, timeAgo, AVATARS, COLORS, formatDay, CHORE_EMOJI, REPEAT_LABEL, KUDOS_EMOJI, CHEER_IDEAS } from '../../format.js';
 
 // ───────────────────────── dialogs ─────────────────────────
 
@@ -338,4 +338,26 @@ export function choreClaimItem(claim, { onDone }) {
     h('div', { class: 'grow' }, h('div', { class: 'row-title' }, `${claim.kid.name} finished `, h('span', null, `${claim.emoji} ${claim.title}`)), h('div', { class: 'row-sub' }, `Earns ${money(claim.rewardCents)} · ${timeAgo(claim.createdAt)}`)),
     h('div', { class: 'cluster' }, reject, approve),
   );
+}
+
+// ───────────────────────── cheers ─────────────────────────
+
+/** Send a kid a short message of encouragement. They get a notification and can say thanks. */
+export function cheerDialog(kid, onDone) {
+  let emoji = KUDOS_EMOJI[0];
+  const message = textField({ label: 'What do you want to say?', placeholder: 'e.g. So proud of how you saved up!', maxlength: 120, autofocus: true });
+  const emojis = pickerGrid({ items: KUDOS_EMOJI, value: emoji, className: 'emoji-grid cheer-emoji-grid', label: 'Emoji', render: (e) => h('button', { class: 'emoji-btn', 'aria-label': `Emoji ${e}` }, e), onPick: (e) => { emoji = e; } });
+  const ideas = h('div', { class: 'chips' }, CHEER_IDEAS.map((t) => h('button', { class: 'chip', type: 'button', onClick: () => { message.input.value = t; message.input.focus(); } }, t)));
+  formModal({
+    title: `Cheer ${kid.name} on`,
+    subtitle: 'A kind word goes a long way. No money involved.',
+    fields: [h('div', { class: 'field' }, h('span', { class: 'label' }, 'Pick an emoji'), emojis.el), message.el, h('div', { class: 'field' }, h('span', { class: 'label' }, 'Or start from an idea'), ideas)],
+    submitLabel: 'Send cheer',
+    accent: kid.color,
+    onSubmit: async () => {
+      await api.post(`/kids/${kid.id}/cheers`, { emoji, message: message.input.value });
+      toast(`${kid.name} will see your cheer`, { emoji });
+      onDone?.();
+    },
+  });
 }

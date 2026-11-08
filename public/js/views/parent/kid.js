@@ -3,8 +3,8 @@ import { icon } from '../../icons.js';
 import { api } from '../../api.js';
 import { defineView } from '../../view.js';
 import { avatar, pill, meter, moneyField, switchControl, activityList, spendChart, toast, banner, badgeShelf } from '../../ui.js';
-import { money, moneyCompact, weekdayName, ordinal, formatDay, describeAllowance, ymdToDate } from '../../format.js';
-import { moneyDialog, editKidDialog, resetPinDialog, removeKidDialog, requestItem, choreClaimItem } from './parts.js';
+import { money, moneyCompact, weekdayName, ordinal, formatDay, describeAllowance, ymdToDate, timeAgo } from '../../format.js';
+import { moneyDialog, editKidDialog, resetPinDialog, removeKidDialog, requestItem, choreClaimItem, cheerDialog } from './parts.js';
 
 // Mirrors the server's schedule maths so the form can preview the first payment.
 function firstDue(todayYmd, freq, day) {
@@ -184,6 +184,34 @@ function goalsCard(d) {
   );
 }
 
+function learningCard(d) {
+  const l = d.learning;
+  return h(
+    'section',
+    { class: 'card' },
+    h('div', { class: 'card-head' },
+      h('div', null, h('h2', { class: 'card-title' }, 'Money Smarts'), h('p', { class: 'card-sub' }, `${l.passedCount} of ${l.total} lessons passed`)),
+      l.streak ? pill(`🔥 ${l.streak}-day streak`, 'warn') : null),
+    meter({ label: 'Progress', value: l.passedCount, max: l.total, textRight: `${Math.round((l.passedCount / l.total) * 100)}%`, tone: 'pos' }),
+    h('ul', { class: 'lesson-chips', 'aria-label': 'Lessons' }, l.lessons.map((x) =>
+      h('li', { class: x.passed ? 'passed' : '', title: x.passed ? `${x.title}: passed (best ${x.bestCorrect}/${x.questions})` : x.attempts ? `${x.title}: not passed yet` : `${x.title}: not started` },
+        h('span', { 'aria-hidden': 'true' }, x.emoji), x.title, h('span', { class: 'sr-only' }, x.passed ? ', passed' : ', not passed yet')))),
+  );
+}
+
+function cheersCard(d, onCheer) {
+  return h(
+    'section',
+    { class: 'card' },
+    h('div', { class: 'card-head' },
+      h('div', null, h('h2', { class: 'card-title' }, 'Cheers'), h('p', { class: 'card-sub' }, `Kind words for ${d.kid.name}`)),
+      h('button', { class: 'btn btn-sm', onClick: onCheer }, icon('heart', 15), 'Send a cheer')),
+    d.cheers.length
+      ? h('div', { class: 'stack-sm' }, d.cheers.slice(0, 3).map((c) => h('div', { class: 'cheer-row' }, h('span', { 'aria-hidden': 'true' }, c.emoji), h('div', { class: 'grow' }, h('div', null, `“${c.message}”`), h('div', { class: 'tiny muted' }, `${timeAgo(c.createdAt)}${c.thanked ? ' · thanked you 💛' : ''}`)))))
+      : h('p', { class: 'muted small' }, `Nothing yet. Celebrate something ${d.kid.name} did well, big or small.`),
+  );
+}
+
 export const kidView = defineView({
   title: (d) => d.kid.name,
   load: ({ id }) => api.get(`/kids/${id}`),
@@ -203,7 +231,8 @@ export const kidView = defineView({
           h('div', { class: 'grow' }, h('h1', null, kid.name), h('div', { class: 'muted' }, `@${kid.username}`), h('div', { class: 'cluster', style: { marginTop: '8px' } }, kid.frozen ? pill('Spending paused', 'warn', 'pause') : pill('Active', 'pos', 'check'), describeAllowance(kid.allowance) ? pill(`Allowance ${describeAllowance(kid.allowance)}`, 'primary', 'calendar') : null)),
           h('div', { class: 'cluster' },
             h('button', { class: 'btn btn-accent', onClick: () => dialog('send') }, icon('send', 18), 'Send money'),
-            h('button', { class: 'btn', onClick: () => dialog('take') }, icon('undo', 18), 'Take back')))),
+            h('button', { class: 'btn', onClick: () => dialog('take') }, icon('undo', 18), 'Take back'),
+            h('button', { class: 'btn', onClick: () => cheerDialog(kid, soft) }, icon('heart', 18), 'Cheer')))),
       kid.frozen ? banner('warn', 'pause', h('b', null, `${kid.name}'s spending is paused. `), 'They can still receive money, save to goals and send requests.') : null,
       pending.length || d.pendingChores.length ? h('section', null, h('div', { class: 'section-head' }, h('h2', null, 'Waiting for you')), h('div', { class: 'card card-flush' }, [...d.pendingChores.map((c) => choreClaimItem(c, { onDone: soft })), ...pending.map((r) => requestItem(r, { onDone: soft }))])) : null,
       h('section', { class: 'grid grid-3 stats' },
@@ -214,6 +243,8 @@ export const kidView = defineView({
         h('div', { class: 'stack-lg' },
           h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Spending'), h('p', { class: 'card-sub' }, 'Last 14 days')), h('div', { style: { textAlign: 'right' } }, h('div', { style: { fontWeight: 800, fontSize: '20px' } }, money(total14)), h('div', { class: 'tiny muted' }, 'total'))), spendChart(d.spendByDay)),
           goalsCard(d),
+          learningCard(d),
+          cheersCard(d, () => cheerDialog(kid, soft)),
           h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Badges'), h('p', { class: 'card-sub' }, `${d.badges.filter((b) => b.earned).length} of ${d.badges.length} earned`))), badgeShelf(d.badges, { compact: true })),
           h('section', null, h('div', { class: 'section-head' }, h('h2', null, 'Activity'), h('a', { class: 'link', href: `#/activity?kid=${kid.id}` }, 'See all', icon('right', 16))), activityList(d.recent, 'parent', { emptyText: `Nothing yet — send ${kid.name} some money to get started.` }))),
         h('div', { class: 'stack' }, allowanceCard(d, refresh), limitsCard(d, refresh), accountCard(d, refresh))),

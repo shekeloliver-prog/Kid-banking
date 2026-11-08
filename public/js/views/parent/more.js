@@ -6,7 +6,7 @@ const ITEMS = [
   ['#/activity', 'list', 'Activity', 'Every dollar in and out'],
   ['#/insights', 'trend', 'Insights', 'Spending, saving and earning'],
   ['#/funding', 'wallet', 'Funding', 'Add funds · cards coming soon'],
-  ['#/settings', 'sliders', 'Settings', 'Profile, password, appearance'],
+  ['#/settings', 'sliders', 'Settings', 'House rules, devices, your data'],
 ];
 
 export const moreView = defineView({

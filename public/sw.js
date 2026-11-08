@@ -1,7 +1,7 @@
 // Nestly service worker: lets the installed app open instantly and show its shell when offline.
 // It only ever handles same-origin GETs for the app's own files. /api/* (all private data) is never touched
 // or cached. Files are fetched network-first, so a new deploy is picked up immediately and the cache is only a fallback.
-const CACHE = 'nestly-shell-v2';
+const CACHE = 'nestly-shell-v3';
 
 self.addEventListener('install', () => self.skipWaiting());
 

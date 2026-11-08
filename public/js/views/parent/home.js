@@ -23,20 +23,23 @@ export function kidGrid(d, refresh) {
 
 function onboarding(d, refresh) {
   const o = d.onboarding;
-  if (o.funds && o.kid && o.allowance) return null;
-  const firstKid = d.kids[0];
-  const step = (n, done, title, text, onClick) =>
-    h('button', { class: `step ${done ? 'done' : ''}`, onClick }, h('span', { class: 'dot' }, done ? icon('check', 15) : String(n)), h('div', null, h('b', null, title), h('span', null, text)));
+  const steps = [
+    ['funds', 'Add practice funds', 'Fill your balance with play money.', () => addFundsDialog({ balanceCents: d.balanceCents, onDone: refresh })],
+    ['kid', 'Add your kid', 'Give them a login and an avatar.', () => addKidDialog({ onDone: (id) => (location.hash = `#/kids/${id}`) })],
+    ['allowance', 'Set an allowance', 'Pay on a schedule, automatically.', () => (d.kids[0] ? (location.hash = `#/kids/${d.kids[0].id}`) : addKidDialog({ onDone: (id) => (location.hash = `#/kids/${id}`) }))],
+    ['chore', 'Give a chore', 'Let them earn a little for helping out.', () => (location.hash = '#/chores')],
+    ['rules', 'Write house rules', 'Agree on a few family basics.', () => (location.hash = '#/settings?focus=rules')],
+  ];
+  const doneCount = steps.filter(([key]) => o[key]).length;
+  if (doneCount === steps.length) return null;
   return h(
     'section',
     { class: 'card' },
-    h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Get set up in 3 steps'), h('p', { class: 'card-sub' }, 'A couple of minutes and your family bank is open.'))),
+    h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Get your family set up'), h('p', { class: 'card-sub' }, `${doneCount} of ${steps.length} done. A couple of minutes and your family bank is open.`)), h('div', { style: { width: '120px' } }, h('div', { class: 'progress pos', role: 'progressbar', 'aria-label': 'Setup progress', 'aria-valuemin': 0, 'aria-valuemax': steps.length, 'aria-valuenow': doneCount }, h('span', { style: { '--p': doneCount / steps.length } })))),
     h(
       'div',
       { class: 'steps' },
-      step(1, o.funds, 'Add practice funds', 'Fill your balance with play money.', () => addFundsDialog({ balanceCents: d.balanceCents, onDone: refresh })),
-      step(2, o.kid, 'Add your kid', 'Give them a login and an avatar.', () => addKidDialog({ onDone: (id) => (location.hash = `#/kids/${id}`) })),
-      step(3, o.allowance, 'Set an allowance', 'Pay on a schedule, automatically.', () => (firstKid ? (location.hash = `#/kids/${firstKid.id}`) : addKidDialog({ onDone: (id) => (location.hash = `#/kids/${id}`) }))),
+      steps.map(([key, title, text, onClick], i) => h('button', { class: `step ${o[key] ? 'done' : ''}`, onClick }, h('span', { class: 'dot' }, o[key] ? icon('check', 15) : String(i + 1)), h('div', null, h('b', null, title), h('span', null, text)))),
     ),
   );
 }

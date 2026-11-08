@@ -1,8 +1,9 @@
 import { h, setBusy } from './dom.js';
 import { icon } from './icons.js';
-import { money, parseMoney, dayLabel, timeOnly, CATEGORY, CATEGORY_LABEL, moneyCompact, formatDay } from './format.js';
+import { money, parseMoney, dayLabel, timeOnly, CATEGORY, CATEGORY_LABEL, moneyCompact, formatDay, AVATARS, COLORS } from './format.js';
 
-const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Either the device asks for less motion, or the person turned on "Reduce motion" in Nestly's settings.
+const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'reduce';
 
 // ───────────────────────── small pieces ─────────────────────────
 
@@ -474,4 +475,101 @@ export function badgeShelf(badges, { compact = false } = {}) {
       ),
     ),
   );
+}
+
+// ───────────────────────── avatar + colour picker ─────────────────────────
+
+/** Avatar and colour choosers with a live preview. `get()` returns { avatar, color }. */
+export function identityPicker({ avatar: initialAvatar, color: initialColor, name = '', caption = 'This is how you’ll look in Nestly' }) {
+  let av = initialAvatar;
+  let color = initialColor;
+  const preview = h('div', { class: 'preview', dataset: { color } }, h('span'), h('div', null, h('b', { style: { fontSize: '17px' } }, name), h('div', { class: 'small muted' }, caption)));
+  const draw = () => {
+    preview.dataset.color = color;
+    preview.firstChild.replaceWith(avatar({ avatar: av, color }, 'lg'));
+  };
+  const avatars = pickerGrid({ items: AVATARS, value: av, className: 'emoji-grid', label: 'Avatar', render: (a) => h('button', { class: 'emoji-btn', 'aria-label': `Avatar ${a}` }, a), onPick: (a) => { av = a; draw(); } });
+  const colors = pickerGrid({ items: COLORS, value: color, className: 'swatches', label: 'Color', render: (c) => h('button', { class: 'swatch', dataset: { color: c }, 'aria-label': c }), onPick: (c) => { color = c; draw(); } });
+  draw();
+  return {
+    get: () => ({ avatar: av, color }),
+    nodes: [preview, h('div', { class: 'field' }, h('span', { class: 'label' }, 'Pick an avatar'), avatars.el), h('div', { class: 'field' }, h('span', { class: 'label' }, 'Favorite color'), colors.el)],
+  };
+}
+
+// ───────────────────────── activity search + filters ─────────────────────────
+
+const RANGES = [['', 'All time'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']];
+
+/**
+ * An activity list with a search box, an In/Out switch and a time range above it. `fetchPage(before, query)` returns
+ * { items, nextBefore } for the current filters; `first` is the already-loaded unfiltered first page.
+ * `query()` gives the current filters as a query-string fragment (starting with "&") for things like the CSV export.
+ */
+export function filteredActivity({ view, first, fetchPage, emptyText }) {
+  const filters = { q: '', dir: '', days: '' };
+  const query = () => {
+    const p = new URLSearchParams();
+    if (filters.q) p.set('q', filters.q);
+    if (filters.dir) p.set('dir', filters.dir);
+    if (filters.days) p.set('days', filters.days);
+    const s = p.toString();
+    return s ? `&${s}` : '';
+  };
+  const host = h('div', { 'aria-live': 'polite' });
+  let seq = 0;
+
+  function show(page) {
+    let cursor = page.nextBefore;
+    const filtered = !!(filters.q || filters.dir || filters.days);
+    host.replaceChildren(
+      activityList(page.items, view, {
+        hasMore: !!cursor,
+        emptyText: filtered ? 'Nothing matches those filters. Try a different word or a longer time range.' : emptyText,
+        loadMore: async () => {
+          const next = await fetchPage(cursor, query());
+          cursor = next.nextBefore;
+          return { rows: next.items, more: !!cursor };
+        },
+      }),
+    );
+  }
+
+  async function reload() {
+    const mine = ++seq;
+    host.setAttribute('aria-busy', 'true');
+    try {
+      const page = await fetchPage(null, query());
+      if (mine === seq) show(page);
+    } catch (e) {
+      if (mine === seq) toast(e.message, { tone: 'error' });
+    } finally {
+      if (mine === seq) host.removeAttribute('aria-busy');
+    }
+  }
+
+  let timer;
+  const search = h('input', { class: 'input', type: 'search', placeholder: 'Search activity…', 'aria-label': 'Search activity', maxlength: 40, autocomplete: 'off', enterkeyhint: 'search' });
+  search.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const v = search.value.trim();
+      if (v !== filters.q) {
+        filters.q = v;
+        reload();
+      }
+    }, 300);
+  });
+  const dirSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Money in or out' });
+  const drawDir = () =>
+    dirSeg.replaceChildren(
+      ...[['', 'All'], ['in', 'In'], ['out', 'Out']].map(([v, label]) =>
+        h('button', { type: 'button', 'aria-pressed': String(filters.dir === v), onClick: () => { if (filters.dir !== v) { filters.dir = v; drawDir(); reload(); } } }, label),
+      ),
+    );
+  drawDir();
+  const range = h('select', { class: 'select', 'aria-label': 'Time range', onChange: (e) => { filters.days = e.target.value; reload(); } }, RANGES.map(([v, label]) => h('option', { value: v }, label)));
+
+  show(first);
+  return { el: h('div', { class: 'stack' }, h('div', { class: 'filter-bar' }, h('div', { class: 'filter-search' }, icon('search', 18), search), dirSeg, range), host), query };
 }
