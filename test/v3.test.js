@@ -313,6 +313,19 @@ test('kid activity can be searched and filtered, paging still works, and CSV exp
   assert.ok(!csv.includes('Oops'));
 });
 
+test('search finds accented words however they were typed', async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent, 'Émile');
+  await H.fund(parent, 5000);
+  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 500, note: 'École trip' });
+  await parent.c.post(`/api/kids/${kid.id}/send`, { amountCents: 300, note: 'cafe CAFÉ' });
+  const found = async (q) => (await parent.c.get(`/api/activity?q=${encodeURIComponent(q)}`)).body.items.map((t) => t.note).sort();
+  for (const q of ['École', 'école', 'ÉCOLE', 'cole']) assert.deepEqual(await found(q), ['École trip'], q);
+  for (const q of ['café', 'CAFÉ', 'Café']) assert.deepEqual(await found(q), ['cafe CAFÉ'], q);
+  assert.equal((await parent.c.get(`/api/activity?q=${encodeURIComponent('émile')}`)).body.items.length, 2, "the kid's name matches too");
+  assert.deepEqual((await kid.c.get(`/api/kid/activity?q=${encodeURIComponent('école')}`)).body.items.map((t) => t.note), ['École trip']);
+});
+
 // ───────────────────────── where I'm signed in ─────────────────────────
 
 const CHROME_MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -445,6 +458,30 @@ test('deleting an account needs the password, removes the whole family, and leav
   assert.equal((await other.c.get('/api/parent/overview')).body.balanceCents, 7000, "another family's money is untouched");
   assert.equal((await otherKid.c.get('/api/kid/overview')).body.kid.balanceCents, 3000);
   await H.assertLedgerBalanced();
+});
+
+test('deleting an account (or a kid) also forgets their failed-login counters', async () => {
+  const parent = await H.newParent();
+  const kid = await H.newKid(parent);
+  const other = await H.newParent('Other');
+  const stray = H.client();
+  const keys = async () => (await H.app.db.all('SELECT key FROM rate_limits')).map((r) => r.key);
+  await stray.post('/api/auth/login', { role: 'parent', identifier: parent.identifier, password: 'nope-nope-nope' });
+  await stray.post('/api/auth/login', { role: 'kid', identifier: kid.username, password: 'nope-nope' });
+  await stray.post('/api/auth/login', { role: 'parent', identifier: other.identifier, password: 'nope-nope-nope' });
+  await kid.c.post('/api/auth/password', { current: 'wrong-pin', next: '654321' });
+  assert.ok((await keys()).some((k) => k.includes(parent.identifier)) && (await keys()).some((k) => k === `confirm:${kid.id}`));
+
+  // closing just the kid clears the kid's keys and leaves the parent's
+  assert.equal((await parent.c.del(`/api/kids/${kid.id}`, { password: parent.password })).status, 200);
+  const afterKid = await keys();
+  assert.ok(!afterKid.some((k) => k.includes(kid.username) || k === `confirm:${kid.id}`), 'kid keys are gone');
+  assert.ok(afterKid.some((k) => k.includes(parent.identifier)), "the parent's are still there");
+
+  assert.equal((await parent.c.del('/api/me', { password: parent.password })).status, 200);
+  const rest = await keys();
+  assert.ok(!rest.some((k) => k.includes(parent.identifier) || k === `confirm:${parent.user.id}`), 'parent keys are gone');
+  assert.ok(rest.some((k) => k.includes(other.identifier)), "another family's counters are untouched");
 });
 
 test('deleting an account is brute-force limited like any other password check', async () => {

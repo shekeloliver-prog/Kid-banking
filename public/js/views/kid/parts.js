@@ -181,7 +181,7 @@ export function goalCard(goal, kid, { onChange }) {
   return h(
     'article',
     { class: `card goal-card ${funded ? 'done' : ''}` },
-    h('div', { class: 'goal-top' }, goalRing(goal), h('div', { class: 'grow' }, h('h3', { style: { fontSize: '19px', fontWeight: 800 } }, goal.name), h('div', { class: 'muted', style: { fontWeight: 600 } }, `${money(goal.savedCents)} of ${moneyCompact(goal.targetCents)}`), h('div', { class: 'small', style: { fontWeight: 700, color: funded ? 'var(--pos)' : 'var(--text-2)' } }, funded ? 'Fully funded! 🎉' : `${Math.round(p * 100)}% there`))),
+    h('div', { class: 'goal-top' }, goalRing(goal), h('div', { class: 'grow' }, h('h3', { style: { fontSize: '1.1875rem', fontWeight: 800 } }, goal.name), h('div', { class: 'muted', style: { fontWeight: 600 } }, `${money(goal.savedCents)} of ${moneyCompact(goal.targetCents)}`), h('div', { class: 'small', style: { fontWeight: 700, color: funded ? 'var(--pos)' : 'var(--text-2)' } }, funded ? 'Fully funded! 🎉' : `${Math.round(p * 100)}% there`))),
     h('div', { class: 'cluster', style: { gap: '8px' } }, actions),
   );
 }

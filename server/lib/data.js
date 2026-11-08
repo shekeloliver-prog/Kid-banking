@@ -7,9 +7,18 @@ const EXPORT_TX_LIMIT = 20_000;
 export function createData(core) {
   const { q, atomic, getUser, nowIso } = core;
 
-  /** Removes one kid and every row that belongs to them. Money handling is the caller's job. */
-  async function purgeKid(kidId) {
-    await q('UPDATE transactions SET counterparty_id = NULL WHERE counterparty_id = ?').run(kidId);
+  const likeEscape = (v) => String(v).replace(/[\\%_]/g, (c) => '\\' + c);
+
+  /**
+   * Removes kids and every row that belongs to them (one pass for any number of kids, so closing a whole family stays a
+   * short transaction). Includes their login-throttle rows, so a deleted username or email leaves nothing behind.
+   * Money handling is the caller's job.
+   */
+  async function purgeKids(kids) {
+    if (!kids.length) return;
+    const ids = kids.map((k) => k.id);
+    const marks = ids.map(() => '?').join(',');
+    await q(`UPDATE transactions SET counterparty_id = NULL WHERE counterparty_id IN (${marks})`).run(...ids);
     for (const [table, column] of [
       ['chore_claims', 'kid_id'],
       ['chores', 'kid_id'],
@@ -23,16 +32,34 @@ export function createData(core) {
       ['sessions', 'user_id'],
       ['kid_controls', 'kid_id'],
     ]) {
-      await q(`DELETE FROM ${table} WHERE ${column} = ?`).run(kidId);
+      await q(`DELETE FROM ${table} WHERE ${column} IN (${marks})`).run(...ids);
     }
-    await q('DELETE FROM users WHERE id = ?').run(kidId);
+    await forgetAttempts([...ids.map((id) => ({ exact: `confirm:${id}` })), ...kids.map((k) => ({ role: 'kid', who: k.username }))]);
+    await q(`DELETE FROM users WHERE id IN (${marks})`).run(...ids);
+  }
+
+  /** Clears failed-login counters for these accounts (see the key shapes in app.js and routes.js). */
+  async function forgetAttempts(entries) {
+    const clauses = [];
+    const args = [];
+    for (const e of entries) {
+      if (e.exact) {
+        clauses.push('key = ?');
+        args.push(e.exact);
+      } else {
+        clauses.push('key = ?', "key LIKE ? ESCAPE '\\'");
+        args.push(`login-acct:${e.role}:${e.who}`, `login:%:${likeEscape(`${e.role}:${e.who}`)}`);
+      }
+    }
+    await q(`DELETE FROM rate_limits WHERE ${clauses.join(' OR ')}`).run(...args);
   }
 
   /** Deletes a parent account together with all of its kids and everything they own. */
   async function deleteParent(parentId) {
     return atomic(async () => {
-      const kids = await q("SELECT id FROM users WHERE parent_id = ? AND role = 'kid'").all(parentId);
-      for (const k of kids) await purgeKid(k.id);
+      const parent = await getUser(parentId);
+      const kids = await q("SELECT id, username FROM users WHERE parent_id = ? AND role = 'kid'").all(parentId);
+      await purgeKids(kids);
       await q('DELETE FROM chore_claims WHERE chore_id IN (SELECT id FROM chores WHERE parent_id = ?)').run(parentId);
       for (const [table, column] of [
         ['chores', 'parent_id'],
@@ -44,6 +71,7 @@ export function createData(core) {
       ]) {
         await q(`DELETE FROM ${table} WHERE ${column} = ?`).run(parentId);
       }
+      if (parent) await forgetAttempts([{ role: 'parent', who: parent.email }, { exact: `confirm:${parentId}` }]);
       await q("DELETE FROM users WHERE id = ? AND role = 'parent'").run(parentId);
       return { deletedKids: kids.length };
     });
@@ -127,5 +155,5 @@ export function createData(core) {
     };
   }
 
-  return { purgeKid, deleteParent, exportFamily };
+  return { purgeKids, deleteParent, exportFamily };
 }

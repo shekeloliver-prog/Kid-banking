@@ -714,7 +714,8 @@ test('database setup that fails once is retried by the next request instead of s
     batch: async () => {
       if (++calls === 1) throw new Error('network blip');
     },
-    execute: async () => ({ rows: [{ x: 1 }], rowsAffected: 0, lastInsertRowid: 0n }),
+    // "no base tables yet" for the existence probe, a plain row for everything else
+    execute: async (stmt) => ({ rows: /sqlite_master/.test(typeof stmt === 'string' ? stmt : stmt.sql) ? [{ n: 0 }] : [{ x: 1 }], rowsAffected: 0, lastInsertRowid: 0n }),
     transaction: async () => ({ execute: async () => ({ rows: [{ x: 1 }] }), commit: async () => {}, rollback: async () => {}, close() {} }),
     close() {},
   };

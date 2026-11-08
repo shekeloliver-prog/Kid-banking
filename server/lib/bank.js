@@ -276,7 +276,7 @@ export function createBank(db, clock = () => new Date()) {
       if (returned > 0) {
         await post(parentId, { kind: 'closed_in', amount: returned, counterparty: kid, note: `Closed ${kid.name}'s account` });
       }
-      await core.data.purgeKid(kidId); // explicit deletes, children first (see data.js)
+      await core.data.purgeKids([kid]); // explicit deletes, children first (see data.js)
       return { returnedCents: returned };
     });
   }
@@ -603,11 +603,16 @@ export function createBank(db, clock = () => new Date()) {
     const sql = [];
     const args = [];
     if (search) {
-      const like = `%${search.toLowerCase().replace(/[\\%_]/g, (c) => '\\' + c)}%`;
-      const fields = [`LOWER(COALESCE(t.note, ''))`, `LOWER(COALESCE(t.counterparty_name, ''))`, `LOWER(COALESCE(t.category, ''))`, `REPLACE(t.kind, '_', ' ')`];
-      if (ownerName) fields.push('LOWER(u.name)'); // the family list joins the account holder as `u`
-      sql.push(`(${fields.map((f) => `${f} LIKE ? ESCAPE '\\'`).join(' OR ')})`);
-      args.push(...fields.map(() => like));
+      // SQLite's LIKE ignores case for plain ASCII only, so for anything else (École, Émile…) also try the common
+      // spellings of the same word: as typed, all lower, all upper, and capitalised.
+      const escape = (s) => s.replace(/[\\%_]/g, (c) => '\\' + c);
+      const lower = search.toLowerCase();
+      const variants = /^[\x00-\x7f]*$/.test(search) ? [search] : [...new Set([search, lower, search.toUpperCase(), lower.charAt(0).toUpperCase() + lower.slice(1)])];
+      const patterns = variants.map((v) => `%${escape(v)}%`);
+      const fields = [`COALESCE(t.note, '')`, `COALESCE(t.counterparty_name, '')`, `COALESCE(t.category, '')`, `REPLACE(t.kind, '_', ' ')`];
+      if (ownerName) fields.push('u.name'); // the family list joins the account holder as `u`
+      sql.push(`(${fields.flatMap((f) => patterns.map(() => `${f} LIKE ? ESCAPE '\\'`)).join(' OR ')})`);
+      fields.forEach(() => args.push(...patterns));
     }
     if (direction === 'in') sql.push('t.amount_cents > 0');
     if (direction === 'out') sql.push('t.amount_cents < 0');

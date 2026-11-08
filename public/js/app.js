@@ -1,6 +1,6 @@
 import { h } from './dom.js';
 import { api } from './api.js';
-import { state, setCounts, buildParentShell, buildKidShell } from './shell.js';
+import { state, setCounts, buildParentShell, buildKidShell, clearStateListeners } from './shell.js';
 import { renderAuth } from './views/auth.js';
 import { toast } from './ui.js';
 import { applyTheme } from './theme.js';
@@ -25,7 +25,12 @@ function navigate() {
   for (const r of current.routes) {
     const m = r.regex.exec(path);
     if (!m) continue;
-    const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
+    let params;
+    try {
+      params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
+    } catch {
+      break; // a malformed address like #/learn/% is treated as "not found"
+    }
     current.view = r.view(params);
     current.shell.host.replaceChildren(current.view.el);
     current.shell.setActive(path);
@@ -37,6 +42,7 @@ function navigate() {
 
 function mountApp({ user, unread, pending }) {
   state.user = user;
+  clearStateListeners(); // only the shell we're about to build should hear about changes
   setCounts({ unread, pending });
   const shell = user.role === 'parent' ? buildParentShell(user, logout) : buildKidShell(user, logout);
   current = { shell, routes: compile(user.role === 'parent' ? parentRoutes : kidRoutes), view: null };
@@ -49,6 +55,7 @@ function showAuth(notice) {
   stopPolling();
   current = null;
   state.user = null;
+  clearStateListeners();
   document.title = 'Nestly – family banking';
   app.replaceChildren(renderAuth({ notice, onAuthed: (me) => { location.hash = '#/'; mountApp(me); } }));
 }
@@ -73,7 +80,9 @@ async function poll() {
       const { items } = await api.get('/notifications');
       const latest = items.find((n) => !n.read);
       if (latest) toast(latest.title, { emoji: latest.icon });
-      if (current?.view?.autoRefresh && !document.querySelector('dialog[open]')) current.view.refresh({ silent: true });
+      // Don't reload the page under someone who has a dialog open, active filters, or is typing in a box.
+      const typing = document.activeElement?.matches?.('input, textarea, select') ?? false;
+      if (current?.view?.autoRefresh && !typing && !document.querySelector('dialog[open], [data-filtered="true"]')) current.view.refresh({ silent: true });
     }
   } catch {
     /* offline – try again next tick */
@@ -88,6 +97,17 @@ function stopPolling() {
 }
 
 applyTheme();
+
+/** A one-time message left by the previous page load (e.g. after deleting the account), shown on the sign-in screen. */
+function takeNotice() {
+  try {
+    const notice = sessionStorage.getItem('nestly-notice');
+    sessionStorage.removeItem('nestly-notice');
+    return notice || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Installable + offline-friendly: the worker only handles the app's own files, never /api (see public/sw.js).
 if ('serviceWorker' in navigator) {
@@ -124,7 +144,7 @@ function showSetupProblem(err) {
   try {
     const session = await api.get('/session');
     if (session.user) mountApp(session);
-    else showAuth();
+    else showAuth(takeNotice());
   } catch (err) {
     // /api/session is public and always answers 200 when the server is healthy, so ANY failure here means the
     // server side isn't working. Say so, rather than showing a sign-in form that can't succeed.

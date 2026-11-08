@@ -10,6 +10,8 @@ export const onState = (fn) => {
   state.listeners.add(fn);
   return () => state.listeners.delete(fn);
 };
+/** Called when the signed-in person changes, so shells from an earlier session stop listening. */
+export const clearStateListeners = () => state.listeners.clear();
 export function setCounts({ unread, pending }) {
   state.unread = unread ?? state.unread;
   state.pending = pending ?? state.pending;
@@ -158,7 +160,7 @@ function userMenu(user, onLogout) {
       h('div', { class: 'menu-label' }, user.role === 'kid' ? `@${user.username}` : user.email),
       user.role === 'parent' ? h('button', { role: 'menuitem', onClick: () => { close(); location.hash = '#/settings'; } }, icon('sliders', 18), 'Settings') : null,
       user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); profileDialog(state.user); } }, icon('sparkle', 18), 'Make it mine') : null,
-      user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); changePasswordDialog(user); } }, icon('key', 18), 'Change my PIN') : null,
+      user.role === 'kid' ? h('button', { role: 'menuitem', onClick: () => { close(); changePasswordDialog(state.user); } }, icon('key', 18), 'Change my PIN') : null,
       themeMenuItem(),
       h('button', { role: 'menuitem', onClick: onLogout }, icon('logout', 18), 'Log out'),
     ),
@@ -251,7 +253,7 @@ export function buildKidShell(user, onLogout) {
     h(
       'header',
       { class: 'kid-top' },
-      h('div', { class: 'kid-top-in' }, face, h('b', { style: { fontSize: '18px' }, title: user.name }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
+      h('div', { class: 'kid-top-in' }, face, h('b', { style: { fontSize: '1.125rem' }, title: user.name }, user.name), h('nav', { class: 'kid-nav', 'aria-label': 'Main' }, links.map((l) => l.a)), h('div', { style: { flex: 1 } }), notificationsBell(), userMenu(user, onLogout)),
     ),
     host,
   );

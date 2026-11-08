@@ -241,7 +241,7 @@ export const kidView = defineView({
         h('div', { class: 'card stat' }, h('div', { class: 'label' }, icon('trend', 17), 'Spent in 7 days'), h('div', { class: 'value' }, money(kid.spent7dCents)), h('div', { class: 'foot' }, kid.weeklyLimitCents != null ? `limit ${moneyCompact(kid.weeklyLimitCents)}` : 'no limit set'))),
       h('div', { class: 'two-col' },
         h('div', { class: 'stack-lg' },
-          h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Spending'), h('p', { class: 'card-sub' }, 'Last 14 days')), h('div', { style: { textAlign: 'right' } }, h('div', { style: { fontWeight: 800, fontSize: '20px' } }, money(total14)), h('div', { class: 'tiny muted' }, 'total'))), spendChart(d.spendByDay)),
+          h('section', { class: 'card' }, h('div', { class: 'card-head' }, h('div', null, h('h2', { class: 'card-title' }, 'Spending'), h('p', { class: 'card-sub' }, 'Last 14 days')), h('div', { style: { textAlign: 'right' } }, h('div', { style: { fontWeight: 800, fontSize: '1.25rem' } }, money(total14)), h('div', { class: 'tiny muted' }, 'total'))), spendChart(d.spendByDay)),
           goalsCard(d),
           learningCard(d),
           cheersCard(d, () => cheerDialog(kid, soft)),

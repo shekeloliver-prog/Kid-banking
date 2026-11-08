@@ -483,7 +483,7 @@ export function badgeShelf(badges, { compact = false } = {}) {
 export function identityPicker({ avatar: initialAvatar, color: initialColor, name = '', caption = 'This is how you’ll look in Nestly' }) {
   let av = initialAvatar;
   let color = initialColor;
-  const preview = h('div', { class: 'preview', dataset: { color } }, h('span'), h('div', null, h('b', { style: { fontSize: '17px' } }, name), h('div', { class: 'small muted' }, caption)));
+  const preview = h('div', { class: 'preview', dataset: { color } }, h('span'), h('div', null, h('b', { style: { fontSize: '1.0625rem' } }, name), h('div', { class: 'small muted' }, caption)));
   const draw = () => {
     preview.dataset.color = color;
     preview.firstChild.replaceWith(avatar({ avatar: av, color }, 'lg'));
@@ -500,6 +500,24 @@ export function identityPicker({ avatar: initialAvatar, color: initialColor, nam
 // ───────────────────────── activity search + filters ─────────────────────────
 
 const RANGES = [['', 'All time'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']];
+
+/**
+ * A segmented control of [value, label, iconName?] options. Rebuilding the buttons on a press would drop keyboard focus,
+ * so the pressed one is focused again.
+ */
+export function segmented({ label, options, get, set, className = '' }) {
+  const wrap = h('div', { class: `seg ${className}`.trim(), role: 'group', 'aria-label': label });
+  const draw = (refocus) => {
+    wrap.replaceChildren(
+      ...options.map(([value, text, ic]) =>
+        h('button', { type: 'button', 'aria-pressed': String(get() === value), onClick: () => { if (get() !== value) { set(value); draw(true); } } }, ic ? icon(ic, 15) : null, text),
+      ),
+    );
+    if (refocus) wrap.querySelector('[aria-pressed="true"]')?.focus();
+  };
+  draw(false);
+  return wrap;
+}
 
 /**
  * An activity list with a search box, an In/Out switch and a time range above it. `fetchPage(before, query)` returns
@@ -522,6 +540,8 @@ export function filteredActivity({ view, first, fetchPage, emptyText }) {
   function show(page) {
     let cursor = page.nextBefore;
     const filtered = !!(filters.q || filters.dir || filters.days);
+    // While filters are on, the page must not quietly reload itself (that would wipe what you typed).
+    host.dataset.filtered = String(filtered);
     host.replaceChildren(
       activityList(page.items, view, {
         hasMore: !!cursor,
@@ -542,7 +562,8 @@ export function filteredActivity({ view, first, fetchPage, emptyText }) {
       const page = await fetchPage(null, query());
       if (mine === seq) show(page);
     } catch (e) {
-      if (mine === seq) toast(e.message, { tone: 'error' });
+      // Don't leave the old list sitting under filters it doesn't match.
+      if (mine === seq) host.replaceChildren(errorState(e, reload));
     } finally {
       if (mine === seq) host.removeAttribute('aria-busy');
     }
@@ -560,14 +581,7 @@ export function filteredActivity({ view, first, fetchPage, emptyText }) {
       }
     }, 300);
   });
-  const dirSeg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Money in or out' });
-  const drawDir = () =>
-    dirSeg.replaceChildren(
-      ...[['', 'All'], ['in', 'In'], ['out', 'Out']].map(([v, label]) =>
-        h('button', { type: 'button', 'aria-pressed': String(filters.dir === v), onClick: () => { if (filters.dir !== v) { filters.dir = v; drawDir(); reload(); } } }, label),
-      ),
-    );
-  drawDir();
+  const dirSeg = segmented({ label: 'Money in or out', options: [['', 'All'], ['in', 'In'], ['out', 'Out']], get: () => filters.dir, set: (v) => { filters.dir = v; reload(); } });
   const range = h('select', { class: 'select', 'aria-label': 'Time range', onChange: (e) => { filters.days = e.target.value; reload(); } }, RANGES.map(([v, label]) => h('option', { value: v }, label)));
 
   show(first);

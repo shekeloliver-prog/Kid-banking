@@ -2,7 +2,7 @@ import { h, setBusy } from '../../dom.js';
 import { icon } from '../../icons.js';
 import { api } from '../../api.js';
 import { defineView } from '../../view.js';
-import { meter, pill, toast, confetti } from '../../ui.js';
+import { meter, pill, toast, confetti, emptyState } from '../../ui.js';
 
 const streakText = (n) => (n > 0 ? `${n}-day streak` : 'No streak yet');
 
@@ -44,10 +44,18 @@ function lessonCard(l) {
 export const lessonView = defineView({
   title: 'Lesson',
   load: async ({ key }) => {
-    const [lesson, progress] = await Promise.all([api.get(`/kid/learn/${encodeURIComponent(key)}`), api.get('/kid/learn')]);
-    return { lesson, progress };
+    try {
+      const [lesson, progress] = await Promise.all([api.get(`/kid/learn/${encodeURIComponent(key)}`), api.get('/kid/learn')]);
+      return { lesson, progress };
+    } catch (err) {
+      if (err.status === 404) return { missing: true };
+      throw err;
+    }
   },
-  render: ({ lesson, progress }) => flow(lesson, progress),
+  render: (d) =>
+    d.missing
+      ? h('div', { class: 'card' }, emptyState({ emoji: '🤔', title: 'We can’t find that lesson', text: 'It may have moved. Pick one from the list.', action: h('a', { class: 'btn btn-accent', href: '#/learn' }, 'See all lessons') }))
+      : flow(d.lesson, d.progress),
 });
 
 function flow(lesson, progress) {
@@ -56,6 +64,8 @@ function flow(lesson, progress) {
   let answers = [];
   let qi = 0;
   let result = null;
+  let submitted = [];
+  let submitting = false;
   const lessonsList = progress.lessons.map((l) => ({ ...l }));
 
   const back = h('a', { class: 'back-link', href: '#/learn' }, icon('left', 16), 'All lessons');
@@ -82,6 +92,7 @@ function flow(lesson, progress) {
         class: 'quiz-option',
         'aria-pressed': String(answers[qi] === i),
         onClick: () => {
+          if (submitting) return;
           answers[qi] = i;
           options.forEach((b, j) => b.setAttribute('aria-pressed', String(j === i)));
           next.disabled = false;
@@ -95,14 +106,20 @@ function flow(lesson, progress) {
         return;
       }
       setBusy(next, true);
+      submitting = true;
+      root.querySelectorAll('.quiz-option, .quiz-back').forEach((b) => (b.disabled = true));
       try {
-        result = await api.post(`/kid/learn/${encodeURIComponent(lesson.key)}`, { answers });
+        submitted = [...answers]; // what was sent is what the review shows, whatever happens to the form meanwhile
+        result = await api.post(`/kid/learn/${encodeURIComponent(lesson.key)}`, { answers: submitted });
         const row = lessonsList.find((l) => l.key === lesson.key);
         if (row && result.passed) row.passed = true;
         finish();
       } catch (err) {
         toast(err.message, { tone: 'error' });
         setBusy(next, false);
+        root.querySelectorAll('.quiz-option, .quiz-back').forEach((b) => (b.disabled = false));
+      } finally {
+        submitting = false;
       }
     });
     root.replaceChildren(
@@ -112,7 +129,7 @@ function flow(lesson, progress) {
         h('div', { class: 'tiny muted', style: { fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' } }, `Question ${qi + 1} of ${total}`),
         h('h2', { id: 'lesson-title', tabindex: '-1', class: 'quiz-q' }, q.q),
         h('div', { class: 'stack-sm', role: 'group', 'aria-labelledby': 'lesson-title' }, options)),
-      h('div', { class: 'cluster' }, qi > 0 ? h('button', { class: 'btn btn-ghost', onClick: () => { qi--; quiz(); } }, icon('left', 16), 'Back') : null, next),
+      h('div', { class: 'cluster' }, qi > 0 ? h('button', { class: 'btn btn-ghost quiz-back', onClick: () => { qi--; quiz(); } }, icon('left', 16), 'Back') : null, next),
     );
     focusTitle();
   }
@@ -133,7 +150,7 @@ function flow(lesson, progress) {
         r.newBadges.length ? h('div', { class: 'cluster', style: { justifyContent: 'center', marginTop: '10px' } }, r.newBadges.map((b) => pill(`${b.emoji} ${b.title}`, 'primary'))) : null),
       h('section', null,
         h('div', { class: 'section-head' }, h('h2', null, 'How you did')),
-        h('div', { class: 'card card-flush' }, lesson.questions.map((q, i) => reviewRow(q, i, answers[i], r.results[i])))),
+        h('div', { class: 'card card-flush' }, lesson.questions.map((q, i) => reviewRow(q, i, submitted[i], r.results[i])))),
       h('div', { class: 'cluster' },
         !r.passed ? h('button', { class: 'btn btn-accent btn-lg', onClick: () => { answers = []; qi = 0; quiz(); } }, icon('undo', 18), 'Try again') : null,
         upNext && r.passed ? h('a', { class: 'btn btn-accent btn-lg', href: `#/learn/${upNext.key}` }, `Next: ${upNext.title}`, icon('right', 18)) : null,

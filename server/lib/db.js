@@ -120,6 +120,8 @@ CREATE INDEX IF NOT EXISTS rate_limits_updated ON rate_limits(updated_at);
 // half-run statement on the connection when it hits a lock, which then poisons every retry).
 const SCHEMA_STATEMENTS = SCHEMA.split(/;[ \t]*\n/).map((t) => t.trim()).filter((t) => t && !/^(--[^\n]*\n?)+$/.test(t));
 
+const BASE_TABLES = ['users', 'sessions', 'kid_controls', 'transactions', 'goals', 'money_requests', 'notifications', 'rate_limits'];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isBusy = (err) => /SQLITE_BUSY|database is locked|SQLITE_LOCKED/i.test(String(err?.message ?? err));
 const plain = (row) => ({ ...row });
@@ -161,7 +163,11 @@ export class Db {
     // Several processes (or serverless instances) may start together on one database: be patient and jitter the retries.
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.client.batch(SCHEMA_STATEMENTS, 'write'); // version 1: idempotent CREATE ... IF NOT EXISTS, all or nothing
+        // Version 1: idempotent CREATE ... IF NOT EXISTS, all or nothing. The base tables never change after that, so a
+        // database that already has them skips this write entirely: instances starting together then only contend for
+        // the (tiny, retried) migration transaction instead of all fighting over the schema batch.
+        const have = await this.client.execute(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN (${BASE_TABLES.map((t) => `'${t}'`).join(',')})`);
+        if (have.rows[0].n < BASE_TABLES.length) await this.client.batch(SCHEMA_STATEMENTS, 'write');
         await this.client.execute(
           'CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)',
         );
@@ -174,28 +180,24 @@ export class Db {
     }
   }
 
-  /** Applies one migration unless it is already recorded. Check + apply + record are one write transaction. */
+  /**
+   * Applies one migration unless it is already recorded. The steps and the record of them go in as ONE all-or-nothing
+   * batch (the same trick as the base schema: an interactive transaction can be left half-open when it hits a lock).
+   * If another instance applied it first, our batch rolls back whole (duplicate column / duplicate version) and we
+   * simply see that it is recorded now.
+   */
   async #migrate({ version, name, statements }) {
-    const tx = await this.client.transaction('write');
+    const recorded = async () => (await this.client.execute({ sql: 'SELECT 1 AS x FROM schema_migrations WHERE version = ?', args: [version] })).rows.length > 0;
+    if (await recorded()) return;
     try {
-      const done = await tx.execute({ sql: 'SELECT 1 FROM schema_migrations WHERE version = ?', args: [version] });
-      if (!done.rows.length) {
-        for (const sql of statements) await tx.execute(sql);
-        await tx.execute({
-          sql: 'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)',
-          args: [version, name, new Date().toISOString()],
-        });
-      }
-      await tx.commit();
+      await this.client.batch(
+        [...statements, { sql: 'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)', args: [version, name, new Date().toISOString()] }],
+        'write',
+      );
     } catch (err) {
-      try {
-        await tx.rollback();
-      } catch {
-        /* already rolled back */
-      }
+      if (isBusy(err)) throw err; // the caller waits a moment and tries again
+      if (await recorded()) return;
       throw err;
-    } finally {
-      tx.close();
     }
   }
 

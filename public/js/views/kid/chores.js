@@ -35,7 +35,7 @@ export function choreCard(c, { parentName, onChange }) {
     'article',
     { class: `chore-card is-${c.state}` },
     h('div', { class: 'e', 'aria-hidden': 'true' }, c.emoji),
-    h('div', { class: 'grow' }, h('div', { class: 'row-title', style: { fontSize: '17px', fontWeight: 800 } }, c.title), h('div', { class: 'row-sub' }, `${money(c.rewardCents)} · ${REPEAT_LABEL[c.repeat]}`), c.state !== 'available' ? h('div', { class: 'small', style: { marginTop: '4px', fontWeight: 600 } }, c.reason) : null),
+    h('div', { class: 'grow' }, h('div', { class: 'row-title', style: { fontSize: '1.0625rem', fontWeight: 800 } }, c.title), h('div', { class: 'row-sub' }, `${money(c.rewardCents)} · ${REPEAT_LABEL[c.repeat]}`), c.state !== 'available' ? h('div', { class: 'small', style: { marginTop: '4px', fontWeight: 600 } }, c.reason) : null),
     c.state === 'available' ? claim : c.state === 'pending' ? undo : pill('Done', 'pos', 'check'),
   );
 }

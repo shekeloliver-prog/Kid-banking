@@ -53,7 +53,7 @@ export const kidHome = defineView({
           ? h('section', { class: 'card' }, h('div', { class: 'row-title', style: { marginBottom: '10px' } }, '🛡️ This week’s spending'), meter({ label: `${money(kid.spent7dCents)} spent`, value: kid.spent7dCents, max: kid.weeklyLimitCents, textRight: remaining > 0 ? `${money(remaining)} left` : 'limit reached' }), kid.freesUpAt && remaining < kid.weeklyLimitCents ? h('p', { class: 'tiny muted', style: { marginTop: '10px' } }, `Your oldest purchase rolls off ${inDays(kid.freesUpAt)}.`) : null)
           : null,
         allowance
-          ? h('section', { class: 'card' }, h('div', { class: 'row-title', style: { marginBottom: '6px' } }, '🗓️ Allowance'), h('div', { style: { fontSize: '22px', fontWeight: 800, letterSpacing: '-0.02em' } }, allowance), kid.allowance.next ? h('p', { class: 'small muted', style: { marginTop: '4px' } }, `Next one: ${formatDay(kid.allowance.next, { weekday: 'long', month: 'short', day: 'numeric' })}`) : null)
+          ? h('section', { class: 'card' }, h('div', { class: 'row-title', style: { marginBottom: '6px' } }, '🗓️ Allowance'), h('div', { style: { fontSize: '1.375rem', fontWeight: 800, letterSpacing: '-0.02em' } }, allowance), kid.allowance.next ? h('p', { class: 'small muted', style: { marginTop: '4px' } }, `Next one: ${formatDay(kid.allowance.next, { weekday: 'long', month: 'short', day: 'numeric' })}`) : null)
           : null),
       choresToDo.length
         ? h('section', null, h('div', { class: 'section-head' }, h('h2', null, 'Chores to do'), h('a', { class: 'link', href: '#/chores' }, 'See all', icon('right', 16))), h('div', { class: 'stack-sm' }, choresToDo.slice(0, 3).map((c) => choreCard(c, { parentName: d.parentName, onChange: soft }))))

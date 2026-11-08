@@ -1,7 +1,7 @@
 import { h, setBusy } from '../../dom.js';
 import { icon } from '../../icons.js';
 import { api, download } from '../../api.js';
-import { toast, confirmModal, passwordField, pill, switchControl } from '../../ui.js';
+import { toast, confirmModal, passwordField, pill, switchControl, segmented } from '../../ui.js';
 import { timeAgo } from '../../format.js';
 import { getTheme, setTheme, THEMES, getTextSize, setTextSize, getReduceMotion, setReduceMotion } from '../../theme.js';
 
@@ -65,12 +65,7 @@ export function rulesCard({ rules: initial }) {
 
 const THEME_UI = { system: ['Auto', 'sparkle'], light: ['Light', 'sun'], dark: ['Dark', 'moon'] };
 
-function seg(label, options, get, set) {
-  const wrap = h('div', { class: 'seg theme-seg', role: 'group', 'aria-label': label });
-  const draw = () => wrap.replaceChildren(...options.map(([value, text, ic]) => h('button', { type: 'button', 'aria-pressed': String(get() === value), onClick: () => { set(value); draw(); } }, ic ? icon(ic, 15) : null, text)));
-  draw();
-  return wrap;
-}
+const seg = (label, options, get, set) => segmented({ label, options, get, set, className: 'theme-seg' });
 
 /** Look and feel for this device: theme, text size, reduced motion. */
 export function displayCard() {
@@ -146,7 +141,11 @@ function deleteAccountDialog(user) {
     confirmLabel: 'Delete everything',
     onConfirm: async () => {
       await api.del('/me', { password: pw.input.value });
-      location.hash = '';
+      try {
+        sessionStorage.setItem('nestly-notice', 'Your account and all of its data were deleted.');
+      } catch {
+        /* the sign-in screen just won't say so */
+      }
       location.reload(); // back to the sign-in screen with a clean slate
       return false; // keep the dialog from flashing closed before the reload
     },

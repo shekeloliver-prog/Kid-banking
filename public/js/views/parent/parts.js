@@ -84,7 +84,7 @@ function kidIdentityFields(initial = {}) {
   let av = initial.avatar ?? AVATARS[Math.floor(Math.random() * AVATARS.length)];
   let color = initial.color ?? COLORS[Math.floor(Math.random() * COLORS.length)];
   const name = textField({ label: 'Name', placeholder: 'e.g. Mia', value: initial.name ?? '', maxlength: 40, autocomplete: 'off', autofocus: true });
-  const preview = h('div', { class: 'preview', dataset: { color } }, h('span'), h('div', null, h('b', { style: { fontSize: '17px' } }), h('div', { class: 'small muted' }, 'This is how they’ll look in Nestly')));
+  const preview = h('div', { class: 'preview', dataset: { color } }, h('span'), h('div', null, h('b', { style: { fontSize: '1.0625rem' } }), h('div', { class: 'small muted' }, 'This is how they’ll look in Nestly')));
   const draw = () => {
     preview.dataset.color = color;
     preview.firstChild.replaceWith(avatar({ avatar: av, color }, 'lg'));

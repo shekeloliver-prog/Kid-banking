@@ -24,7 +24,7 @@ export const fundingView = defineView({
         h('div', { class: 'coming-card' },
           h('div', { class: 'fake-card', 'aria-hidden': 'true' }, h('div', { class: 'chipline' }), h('div', { class: 'dots' }, '•••• •••• •••• ••••')),
           h('div', { class: 'stack-sm' },
-            h('div', { class: 'cluster' }, h('h3', { style: { fontSize: '19px' } }, 'Credit & debit cards'), pill('Coming soon', 'primary', 'sparkle')),
+            h('div', { class: 'cluster' }, h('h3', { style: { fontSize: '1.1875rem' } }, 'Credit & debit cards'), pill('Coming soon', 'primary', 'sparkle')),
             h('p', { class: 'text-2' }, 'Soon you’ll be able to link a card and top up your balance in a tap. We haven’t turned this on yet, so Nestly isn’t asking for any card details.'),
             h('p', { class: 'small muted' }, 'Until then, practice funds let you try everything — allowances, limits, goals — with play money.')))),
       h('section', { class: 'card' },
