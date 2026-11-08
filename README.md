@@ -48,7 +48,14 @@ three-step setup on the home page.
   the reward moves from your balance to theirs exactly once. Send it back with a note if it isn't done.
 - **Insights** — spending by category, week by week and per kid over 7/30/90 days; **export** all activity as a CSV.
 - **Badges** you can see on each kid's page, and **notifications** for requests, chores, purchases, goals and missed payments.
-- **Install it** on a phone or desktop as an app, and choose light, dark or match-my-device.
+- **Cheer them on** — send a kid a short message with an emoji (up to 10 a day each); they can say thanks and you'll be told.
+- **See their learning** — which Money Smarts lessons they've passed and their learning streak.
+- **House rules** — up to 8 family rules that show on every kid's home screen; kids get a heads-up when they change.
+- **Search the activity feed** by name, note or category, narrow it to money in or out and the last 7/30/90 days;
+  the CSV export follows whatever you've filtered.
+- **Your account, your data** — see every device you're signed in on and sign any of them out, **download everything**
+  your family has put into Nestly as a JSON file (never including passwords), or **delete the account** and all of its data.
+- **Install it** on a phone or desktop as an app, and choose light, dark or match-my-device, larger text, or reduced motion.
 
 ## What kids can do
 
@@ -56,7 +63,12 @@ three-step setup on the home page.
 - **Spend** (record a purchase by category), **ask** a parent for money, and **save** toward goals
   with progress rings — hit the target and buy it, with confetti.
 - **Chores** to earn money, with a big *I did it!* button and a record of what they've earned.
-- **Badges** to collect (Goal Setter, Piggy Saver, Chore Champ…).
+- **Money Smarts** — eight two-minute lessons (needs vs. wants, saving, goals, spending smart, earning, giving, staying safe,
+  planning) with a three-question quiz each. Scoring happens on the server, wrong answers just mean "try again", and
+  passing lessons on consecutive days builds a learning streak. Lessons never touch anyone's balance.
+- **Badges** to collect (Goal Setter, Piggy Saver, Chore Champ, Curious Mind, On a Roll, Money Whiz…).
+- **Cheers** from their parent, and the **house rules**, right on the home screen.
+- **Make it mine** — pick their own avatar and colour.
 - Their own notifications and activity history.
 
 ## How it works
@@ -176,6 +188,7 @@ still due, so it can never pay twice.
 Schema changes live in `server/lib/migrations.js` as numbered steps. On startup each one runs at most once per database, inside a
 single write transaction that also records it in `schema_migrations`, so two instances starting at the same time can't both apply it.
 Existing accounts, balances and history are never reset. To change the schema, append a new entry — never edit an old one.
+The current version is 3 (lessons, cheers, house rules, device names for signed-in sessions).
 
 ## Tests
 
